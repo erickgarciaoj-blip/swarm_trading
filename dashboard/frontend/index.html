@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Swarm Trading — Live Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:        #0a0e14;
+    --panel:     #10161f;
+    --panel-alt: #141b26;
+    --border:    #1f2937;
+    --text:      #d6deeb;
+    --text-dim:  #6b7686;
+    --green:     #3fd68c;
+    --red:       #ff5c72;
+    --yellow:    #f5c542;
+    --gray:      #8892a0;
+    --accent:    #4fa3ff;
+    --mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  #app {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────── */
+  header {
+    display: flex; align-items: center; gap: 24px;
+    padding: 10px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 15px; letter-spacing: 0.08em; margin: 0;
+    color: var(--text); font-weight: 700;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 3px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+    border: 1px solid var(--border);
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .badge.live  { color: var(--red);   border-color: var(--red); }
+  .badge.paper { color: var(--yellow);border-color: var(--yellow); }
+  .badge.open  { color: var(--green); border-color: var(--green); }
+  .badge.closed{ color: var(--gray);  border-color: var(--gray); }
+  .badge.halted{ color: var(--red);   border-color: var(--red); background: rgba(255,92,114,0.08); }
+
+  /* Per-symbol market status chips — real exchange calendars per symbol
+     (NYSE/CME/NYMEX/FX-week), not a single generic "market open" badge. */
+  .market-status { display: flex; gap: 4px; flex-wrap: wrap; }
+  .market-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+    border: 1px solid var(--border);
+  }
+  .market-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .market-chip.open   { color: var(--green); border-color: var(--green); }
+  .market-chip.closed { color: var(--gray);  border-color: var(--gray); }
+
+  .stat { display: flex; flex-direction: column; line-height: 1.3; }
+  .stat .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  .stat .value { font-size: 16px; font-weight: 700; }
+  .value.pos { color: var(--green); }
+  .value.neg { color: var(--red); }
+
+  .spacer { flex: 1; }
+
+  button.action {
+    font-family: var(--mono);
+    font-size: 12px; font-weight: 700; letter-spacing: 0.05em;
+    padding: 8px 18px; border-radius: 4px; border: 1px solid transparent;
+    cursor: pointer; text-transform: uppercase;
+  }
+  button.halt   { background: var(--red);   color: #1a0507; }
+  button.resume { background: var(--green); color: #04150c; }
+  button.action:hover { filter: brightness(1.12); }
+  button.action:active { filter: brightness(0.92); }
+  button.action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #conn-indicator { font-size: 11px; color: var(--text-dim); }
+  #conn-indicator.connected { color: var(--green); }
+  #conn-indicator.disconnected { color: var(--red); }
+
+  /* ── Body layout ────────────────────────────────────────────────────── */
+  main {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .panel {
+    background: var(--panel);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-title {
+    padding: 10px 14px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel-body { flex: 1; overflow-y: auto; }
+
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    position: sticky; top: 0;
+    background: var(--panel-alt);
+    text-align: left; font-size: 10px; text-transform: uppercase;
+    color: var(--text-dim); letter-spacing: 0.05em;
+    padding: 7px 12px; border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 6px 12px; border-bottom: 1px solid rgba(31,41,55,0.5);
+    white-space: nowrap;
+  }
+  tbody tr:hover { background: rgba(79,163,255,0.05); }
+
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-ACTIVE  .status-dot { background: var(--green); }
+  .status-RETIRED .status-dot { background: var(--red); }
+  .status-PAUSED  .status-dot { background: var(--gray); }
+  .status-TRAINING .status-dot { background: var(--yellow); }
+  .status-ACTIVE   { color: var(--green); }
+  .status-RETIRED  { color: var(--red); }
+  .status-PAUSED   { color: var(--gray); }
+  .status-TRAINING { color: var(--yellow); }
+
+  #chart-wrap { flex: 1; padding: 12px; min-height: 0; }
+  #chart-wrap canvas { width: 100% !important; height: 100% !important; }
+
+  .empty { padding: 24px; text-align: center; color: var(--text-dim); }
+
+  .agent-row { cursor: pointer; }
+  .agent-row.selected { background: rgba(79,163,255,0.12); }
+
+  /* ── Agent detail drawer ─────────────────────────────────────────────
+     Non-blocking side panel (not a modal): the table stays scrollable and
+     clickable while it's open, so you can click through several agents
+     without closing it each time. Close via the × button or Escape. */
+  #agent-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 90vw;
+    background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    transform: translateX(100%); transition: transform 0.2s ease;
+    box-shadow: -12px 0 32px rgba(0,0,0,0.5);
+    z-index: 50;
+  }
+  #agent-drawer.open { transform: translateX(0); }
+
+  .drawer-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  .drawer-header h2 {
+    font-size: 12px; margin: 0; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .drawer-close {
+    background: none; border: none; color: var(--text-dim);
+    font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 8px; flex-shrink: 0;
+  }
+  .drawer-close:hover { color: var(--text); }
+
+  .drawer-body { flex: 1; overflow-y: auto; padding: 14px; }
+
+  .detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 12px; margin-bottom: 20px; }
+  .detail-grid .dt { color: var(--text-dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; align-self: center; }
+  .detail-grid .dd { font-weight: 700; }
+
+  .drawer-section-title {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-dim); margin: 0 0 8px;
+  }
+  .drawer-body table { font-size: 11px; }
+  .drawer-body thead th { padding: 5px 8px; }
+  .drawer-body tbody td { padding: 5px 8px; }
+
+  /* ── Bottom trade log ───────────────────────────────────────────────── */
+  footer {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    max-height: 220px; overflow-y: auto;
+  }
+  .pnl.pos { color: var(--green); }
+  .pnl.neg { color: var(--red); }
+  .side-LONG  { color: var(--green); }
+  .side-SHORT { color: var(--red); }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <h1>SWARM TRADING</h1>
+    <span id="badge-env" class="badge paper"><span class="dot"></span>PAPER</span>
+    <div id="market-status" class="market-status"></div>
+    <span id="badge-halted" class="badge halted" style="display:none"><span class="dot"></span>HALTED</span>
+
+    <div class="stat">
+      <span class="label">Equity Total</span>
+      <span id="stat-equity" class="value">—</span>
+    </div>
+    <div class="stat">
+      <span class="label">PnL del día</span>
+      <span id="stat-daily-pnl" class="value">—</span>
+    </div>
+    <div class="stat">
+      <span class="label">Agentes activos</span>
+      <span id="stat-active" class="value">—</span>
+    </div>
+
+    <div class="spacer"></div>
+    <span id="conn-indicator" class="disconnected">● desconectado</span>
+    <button id="btn-halt" class="action halt">Halt</button>
+    <button id="btn-resume" class="action resume">Resume</button>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-title">
+        <span id="agents-title">AGENTES (100)</span>
+        <span id="agents-count"></span>
+      </div>
+      <div class="panel-body">
+        <table>
+          <thead>
+            <tr>
+              <th>Agente</th><th>Tipo</th><th>Símbolo</th>
+              <th>Equity</th><th>Win Rate</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="agents-body">
+            <tr><td colspan="6" class="empty">Esperando datos del swarm…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><span>Curva de equity (últimos 60 puntos)</span></div>
+      <div id="chart-wrap"><canvas id="equity-chart"></canvas></div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="panel-title"><span>Últimos trades</span></div>
+    <table>
+      <thead>
+        <tr><th>Hora</th><th>Agente</th><th>Símbolo</th><th>Side</th><th>PnL</th></tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr><td colspan="5" class="empty">Sin trades todavía</td></tr>
+      </tbody>
+    </table>
+  </footer>
+
+</div>
+
+<aside id="agent-drawer">
+  <div class="drawer-header">
+    <h2 id="drawer-title">Detalle de agente</h2>
+    <button id="drawer-close" class="drawer-close" aria-label="Cerrar">&times;</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const fmtMoney = (n) => (n == null ? "—" : "$" + Number(n).toFixed(2));
+  const fmtPct   = (n) => (n == null ? "—" : (Number(n) * 100).toFixed(1) + "%");
+  const fmtTime  = (iso) => (iso ? new Date(iso).toLocaleTimeString() : "—");
+  const fmtNum   = (n, d = 3) => (n == null ? "—" : Number(n).toFixed(d));
+
+  // Latest agent rows keyed by id (type/symbol aren't in /agents/{id}/metrics,
+  // so the drawer reads those from the last WebSocket snapshot instead).
+  let latestAgents = {};
+  let selectedAgentId = null;
+
+  // ── Equity chart ────────────────────────────────────────────────────
+  const MAX_POINTS = 60;
+  const chartCtx = $("equity-chart").getContext("2d");
+  const equityChart = new Chart(chartCtx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [{
+        label: "Total Equity",
+        data: [],
+        borderColor: "#3fd68c",
+        backgroundColor: "rgba(63,214,140,0.08)",
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.25,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#6b7686", maxTicksLimit: 6 }, grid: { color: "#1f2937" } },
+        y: { ticks: { color: "#6b7686" }, grid: { color: "#1f2937" } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+
+  function pushEquityPoint(ts, equity) {
+    const labels = equityChart.data.labels;
+    const data = equityChart.data.datasets[0].data;
+    labels.push(new Date(ts).toLocaleTimeString());
+    data.push(equity);
+    if (labels.length > MAX_POINTS) { labels.shift(); data.shift(); }
+    equityChart.update("none");
+  }
+
+  // ── Rendering ───────────────────────────────────────────────────────
+  function renderWaiting() {
+    $("agents-body").innerHTML = '<tr><td colspan="6" class="empty">Orchestrator no inicializado — esperando swarm…</td></tr>';
+  }
+
+  function renderSnapshot(msg) {
+    const swarm = msg.swarm || {};
+
+    $("stat-equity").textContent = fmtMoney(swarm.total_equity);
+    const pnl = swarm.daily_pnl;
+    const pnlEl = $("stat-daily-pnl");
+    pnlEl.textContent = fmtMoney(pnl);
+    pnlEl.className = "value " + (pnl > 0 ? "pos" : pnl < 0 ? "neg" : "");
+    $("stat-active").textContent = swarm.active_agents ?? "—";
+
+    const envBadge = $("badge-env");
+    const isLive = (msg.app_env === "live");
+    envBadge.textContent = isLive ? "LIVE" : "PAPER";
+    envBadge.className = "badge " + (isLive ? "live" : "paper");
+    envBadge.prepend(Object.assign(document.createElement("span"), { className: "dot" }));
+
+    // Per-symbol market status (real NYSE/CME/NYMEX/FX-week calendars —
+    // see data/feeds/market_hours.py — not one generic open/closed badge).
+    const marketStatus = msg.market_status || {};
+    $("market-status").innerHTML = Object.entries(marketStatus).map(([symbol, open]) => `
+      <span class="market-chip ${open ? "open" : "closed"}">
+        <span class="dot"></span>${symbol}
+      </span>
+    `).join("");
+
+    $("badge-halted").style.display = swarm.is_halted ? "inline-flex" : "none";
+
+    // Agents table — full swarm, sorted by equity desc (server already sorts,
+    // this is just a safety net in case a future payload doesn't).
+    const agents = (msg.agents || []).slice().sort((a, b) => (b.equity ?? 0) - (a.equity ?? 0));
+    latestAgents = {};
+    agents.forEach((a) => { latestAgents[a.id] = a; });
+
+    $("agents-title").textContent = `AGENTES (${agents.length})`;
+    $("agents-count").textContent = agents.length ? `${swarm.active_agents ?? 0} activos` : "";
+
+    if (!agents.length) {
+      $("agents-body").innerHTML = '<tr><td colspan="6" class="empty">Sin agentes registrados todavía</td></tr>';
+    } else {
+      $("agents-body").innerHTML = agents.map((a) => `
+        <tr class="status-${a.status} agent-row${a.id === selectedAgentId ? " selected" : ""}" data-agent-id="${a.id}">
+          <td>${a.id}</td>
+          <td>${a.type}</td>
+          <td>${a.symbol}</td>
+          <td>${fmtMoney(a.equity)}</td>
+          <td>${fmtPct(a.win_rate)}</td>
+          <td><span class="status-dot"></span>${a.status}</td>
+        </tr>
+      `).join("");
+    }
+
+    // Trades log
+    const trades = msg.last_trades || [];
+    if (!trades.length) {
+      $("trades-body").innerHTML = '<tr><td colspan="5" class="empty">Sin trades todavía</td></tr>';
+    } else {
+      $("trades-body").innerHTML = trades.map((t) => `
+        <tr>
+          <td>${fmtTime(t.closed_at)}</td>
+          <td>${t.agent_id}</td>
+          <td>${t.symbol}</td>
+          <td class="side-${t.side}">${t.side}</td>
+          <td class="pnl ${t.pnl >= 0 ? "pos" : "neg"}">${t.pnl >= 0 ? "+" : ""}${Number(t.pnl).toFixed(4)}</td>
+        </tr>
+      `).join("");
+    }
+
+    if (swarm.total_equity != null) {
+      pushEquityPoint(msg.timestamp || Date.now(), swarm.total_equity);
+    }
+  }
+
+  function handleMessage(raw) {
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+    if (!msg || typeof msg !== "object") return;
+
+    if (msg.status === "waiting") {
+      renderWaiting();
+      return;
+    }
+    if (msg.swarm) {
+      renderSnapshot(msg);
+      return;
+    }
+    // Unknown/legacy message shapes (e.g. orchestrator event pushes) are ignored.
+  }
+
+  // ── Agent detail drawer ─────────────────────────────────────────────
+  function markSelectedRow() {
+    document.querySelectorAll("#agents-body tr.agent-row").forEach((row) => {
+      row.classList.toggle("selected", row.dataset.agentId === selectedAgentId);
+    });
+  }
+
+  function openDrawer() {
+    $("agent-drawer").classList.add("open");
+  }
+
+  function closeDrawer() {
+    $("agent-drawer").classList.remove("open");
+    selectedAgentId = null;
+    markSelectedRow();
+  }
+
+  function renderAgentDetail(agentId, metrics, trades) {
+    const row = latestAgents[agentId] || {};
+    const rows = [
+      ["ID",           metrics.agent_id ?? agentId],
+      ["Tipo",         row.type ?? "—"],
+      ["Símbolo",      row.symbol ?? "—"],
+      ["Equity",       fmtMoney(metrics.equity)],
+      ["Win Rate",     fmtPct(metrics.win_rate)],
+      ["Sharpe",       fmtNum(metrics.sharpe)],
+      ["Max Drawdown", fmtPct(metrics.max_drawdown)],
+      ["Trades",       metrics.total_trades ?? "—"],
+      ["Status",       metrics.status ?? "—"],
+    ];
+    const detailHtml = `
+      <div class="detail-grid">
+        ${rows.map(([label, value]) => `<div class="dt">${label}</div><div class="dd">${value}</div>`).join("")}
+      </div>
+    `;
+
+    const tradesHtml = !trades.length
+      ? '<div class="empty">Sin trades registrados</div>'
+      : `
+        <table>
+          <thead>
+            <tr><th>Hora</th><th>Side</th><th>Entry</th><th>PnL</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            ${trades.map((t) => `
+              <tr>
+                <td>${fmtTime(t.opened_at)}</td>
+                <td class="side-${t.side}">${t.side}</td>
+                <td>${fmtNum(t.entry_price, 5)}</td>
+                <td class="pnl ${t.pnl >= 0 ? "pos" : "neg"}">${t.pnl >= 0 ? "+" : ""}${Number(t.pnl).toFixed(4)}</td>
+                <td>${t.status}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+
+    $("drawer-body").innerHTML = `
+      ${detailHtml}
+      <p class="drawer-section-title">Últimos trades</p>
+      ${tradesHtml}
+    `;
+  }
+
+  async function loadAgentDetail(agentId) {
+    $("drawer-title").textContent = agentId;
+    $("drawer-body").innerHTML = '<div class="empty">Cargando…</div>';
+
+    try {
+      const [metricsRes, tradesRes] = await Promise.all([
+        fetch(`/agents/${encodeURIComponent(agentId)}/metrics`),
+        fetch(`/agents/${encodeURIComponent(agentId)}/trades?limit=10`),
+      ]);
+      if (agentId !== selectedAgentId) return; // user clicked another row meanwhile
+
+      const metrics = await metricsRes.json();
+      if (!metricsRes.ok || metrics.error) throw new Error(metrics.error || "request failed");
+      const trades = await tradesRes.json();
+
+      renderAgentDetail(agentId, metrics, Array.isArray(trades) ? trades : []);
+    } catch (e) {
+      if (agentId !== selectedAgentId) return;
+      $("drawer-body").innerHTML = '<div class="empty">No se pudo cargar métricas de este agente</div>';
+    }
+  }
+
+  function selectAgent(agentId) {
+    selectedAgentId = agentId;
+    markSelectedRow();
+    openDrawer();
+    loadAgentDetail(agentId);
+  }
+
+  document.addEventListener("click", (evt) => {
+    const row = evt.target.closest(".agent-row");
+    if (row) selectAgent(row.dataset.agentId);
+  });
+  $("drawer-close").addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", (evt) => {
+    if (evt.key === "Escape") closeDrawer();
+  });
+
+  // ── WebSocket connection with auto-reconnect ───────────────────────
+  let socket = null;
+  let reconnectDelay = 1000;
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    socket = new WebSocket(`${proto}//${location.host}/ws`);
+
+    socket.onopen = () => {
+      reconnectDelay = 1000;
+      const el = $("conn-indicator");
+      el.textContent = "● conectado";
+      el.className = "connected";
+    };
+    socket.onmessage = (evt) => handleMessage(evt.data);
+    socket.onclose = () => {
+      const el = $("conn-indicator");
+      el.textContent = "● desconectado — reintentando…";
+      el.className = "disconnected";
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+    };
+    socket.onerror = () => socket.close();
+  }
+  connect();
+
+  // ── Halt / Resume controls ─────────────────────────────────────────
+  async function post(path) {
+    try {
+      const res = await fetch(path, { method: "POST" });
+      return await res.json();
+    } catch (e) {
+      console.error("request failed", path, e);
+    }
+  }
+  $("btn-halt").addEventListener("click", () => post("/swarm/halt"));
+  $("btn-resume").addEventListener("click", () => post("/swarm/resume"));
+})();
+</script>
+</body>
+</html>

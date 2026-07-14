@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+.env
+
+# Data & logs
+*.log
+*.csv
+*.db
+*.sqlite3
+
+# RL model checkpoints (train via agents/rl/train.py)
+agents/rl/checkpoints/
+
+# VS Code
+.vscode/settings.json
+
+# OS
+.DS_Store
+Thumbs.db

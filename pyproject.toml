@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "swarm-trading"
+version = "0.1.0"
+description = "100-agent autonomous trading swarm for XAUUSD, PLTR, NASDAQ, US100 and Oil"
+requires-python = ">=3.11"
+authors = [{ name = "Erick García" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

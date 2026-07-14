@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Swarm (paper)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "env": {"APP_ENV": "development"}
+    },
+    {
+      "name": "Run MCP Server",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/core/mcp_server.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Run Dashboard only",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["dashboard.api.routes:app", "--reload", "--port", "8000"],
+      "console": "integratedTerminal"
+    }
+  ]
+}

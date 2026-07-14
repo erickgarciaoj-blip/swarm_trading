@@ -1,0 +1,72 @@
+# Core async & runtime
+asyncio-throttle==1.0.2
+aiohttp==3.9.5
+aiofiles==23.2.1
+uvicorn[standard]==0.30.6  # mcp==1.2.0 requires uvicorn>=0.30
+fastapi==0.111.0
+
+# Data
+pandas==2.2.2
+numpy==1.26.4
+# TA-Lib wraps the native ta-lib C library — on macOS (incl. Apple Silicon)
+# install it with Homebrew first: see scripts/install_macos.sh.
+TA-Lib>=0.4.28
+yfinance==0.2.40
+polygon-api-client==1.14.2
+pandas-market-calendars==5.4.0  # exact NYSE/CME/NYMEX exchange calendars for market-hours checks
+
+# ML / RL
+torch==2.3.1
+stable-baselines3==2.3.2
+gymnasium==0.29.1
+scikit-learn==1.5.0
+xgboost==2.0.3
+
+# Brokers
+# MetaTrader5: official package only ships Windows wheels — there is no
+# macOS/Linux build. On Mac, run with app_env != "live" so IBKRBroker
+# (paper trading) is used instead; MT5Broker.connect() will no-op safely.
+# MetaTrader5==5.0.4748
+#
+# ibapi: NOT published on PyPI — install manually from Interactive Brokers:
+#   1. Download the TWS API installer: https://interactivebrokers.github.io
+#   2. cd IBJts/source/pythonclient && python setup.py install
+# ibapi==10.19.2
+ccxt==4.3.77
+
+# MCP
+mcp==1.2.0
+
+# DB / cache
+asyncpg==0.29.0
+aiosqlite==0.20.0   # async SQLite driver — used for local dev (no Supabase)
+redis[asyncio]==5.0.5
+sqlalchemy[asyncio]==2.0.30
+alembic==1.13.1
+supabase==2.4.5
+
+# News & events
+feedparser==6.0.11
+httpx==0.27.0
+beautifulsoup4==4.12.3
+
+# Messaging
+python-telegram-bot==21.3
+websockets==12.0
+
+# Config & utils
+python-dotenv==1.0.1
+# mcp==1.2.0 requires pydantic>=2.10.1 and pydantic-settings>=2.6.1;
+# the original 2.7.1 / 2.3.0 pins conflicted with it.
+pydantic==2.10.6
+pydantic-settings==2.7.1
+loguru==0.7.2
+typer==0.12.3
+rich==13.7.1
+
+# Dev tools
+pytest==8.2.2
+pytest-asyncio==0.23.7
+black==24.4.2
+ruff==0.4.9
+mypy==1.10.0
