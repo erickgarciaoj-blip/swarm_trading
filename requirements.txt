@@ -47,8 +47,8 @@ gymnasium==0.29.1
 mcp==1.2.0
 
 # DB / cache
-asyncpg==0.31.0  # postgres driver — not active until Fase 3 (still on SQLite today). 0.29.0 has no cp311 wheel.
-aiosqlite==0.22.1   # async SQLite driver — used for local dev
+asyncpg==0.31.0  # postgres driver — the real runtime DB as of Fase 3. 0.29.0 has no cp311 wheel.
+aiosqlite==0.22.1   # async SQLite driver — dev/unit-tests only, see ADR-0008
 sqlalchemy[asyncio]==2.0.51
 alembic==1.13.1
 # supabase was pinned but unused (SUPABASE_URL/KEY in core/config.py are
