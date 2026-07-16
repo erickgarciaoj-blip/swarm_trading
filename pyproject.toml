@@ -12,7 +12,14 @@ authors = [{ name = "Erick García" }]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=. --cov-report=term-missing --cov-config=pyproject.toml"
+# integration tests need a real PostgreSQL instance (see
+# tests/integration/ and docs/architecture/adr/0008) — excluded from the
+# default run so `pytest tests/` stays fast and dependency-free; CI's
+# postgres-integration job runs them explicitly with `-m integration`.
+addopts = "--cov=. --cov-report=term-missing --cov-config=pyproject.toml -m 'not integration'"
+markers = [
+    "integration: requires a real PostgreSQL instance, never run against SQLite (see tests/integration/)",
+]
 
 [tool.ruff]
 line-length = 120

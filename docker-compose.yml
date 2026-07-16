@@ -1,21 +1,72 @@
 services:
+  postgres:
+    # Pinned major version, not `latest` — an unannounced major bump here
+    # would be a breaking schema-compat surprise, not a routine patch update.
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-swarm_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-swarm}
+      # No default here on purpose — an empty/missing POSTGRES_PASSWORD fails
+      # the compose file to parse rather than silently starting Postgres
+      # with a blank or guessable password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-swarm} -d ${POSTGRES_DB:-swarm_trading}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - swarm_net
+    # Not exposed to the host on purpose — only the "swarm"/"migrate"
+    # services on swarm_net can reach it. Use an SSH tunnel or
+    # `docker compose exec postgres psql ...` for manual inspection.
+
+  # One-off: `docker compose run --rm migrate` applies pending Alembic
+  # migrations. Never starts automatically (profile "tools") and is never a
+  # substitute for `alembic upgrade head` being run before "swarm" serves
+  # traffic — the app itself never creates or modifies schema (see
+  # data/historic/repository.py::init() and ADR-0008).
+  migrate:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - swarm_net
+    entrypoint: ["alembic", "upgrade", "head"]
+    profiles:
+      - tools
+
   swarm:
     build: .
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      # SQLite lives on the named volume below, not inside the container
-      # filesystem, so trade history survives image rebuilds/redeploys.
-      DATABASE_URL: sqlite+aiosqlite:////data/swarm_trading.db
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       # Bound to localhost only — the dashboard has no auth, and /swarm/halt
       # is an unauthenticated POST. Reach it via an SSH tunnel:
       #   ssh -L 8000:localhost:8000 <user>@<vps-ip>
       # then open http://localhost:8000/frontend/ on your own machine.
       - "127.0.0.1:8000:8000"
-    volumes:
-      - swarm_data:/data
+    networks:
+      - swarm_net
 
 volumes:
-  swarm_data:
+  # swarm_data (the old SQLite-file volume) is gone — Postgres, on its own
+  # postgres_data volume above, is the persistence layer now.
+  postgres_data:
+
+networks:
+  swarm_net:
