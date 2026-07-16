@@ -1,7 +1,11 @@
 """Central configuration using Pydantic-Settings. All values come from .env."""
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# app_env values that mean "trading real or paper capital, unattended" — as
+# opposed to "development", where a throwaway local SQLite file is fine.
+_PRODUCTION_LIKE_ENVS = frozenset({"paper", "live"})
 
 
 class SwarmSettings(BaseSettings):
@@ -62,6 +66,21 @@ class SwarmSettings(BaseSettings):
     # where the offline `agents/rl/train.py` script saves them to.
     rl_model_dir: str = "agents/rl/checkpoints"
     rl_pretrain_timesteps: int = 20_000
+
+    @model_validator(mode="after")
+    def _no_silent_sqlite_in_production(self) -> "SwarmSettings":
+        """SQLite (the default) is for local dev and unit tests only — see
+        docs/architecture/adr/0008-postgresql-alembic-schema-authority.md.
+        A paper/live run against SQLite would silently skip Alembic-managed
+        schema guarantees and concurrent-write safety, so fail loudly at
+        startup instead of degrading quietly."""
+        if self.app_env in _PRODUCTION_LIKE_ENVS and self.database_url.startswith("sqlite"):
+            raise ValueError(
+                f"DATABASE_URL must point to PostgreSQL when APP_ENV={self.app_env!r} "
+                "(got a sqlite:// URL). SQLite is for local development and unit tests "
+                "only. Set DATABASE_URL=postgresql+asyncpg://... in .env."
+            )
+        return self
 
 
 settings = SwarmSettings()

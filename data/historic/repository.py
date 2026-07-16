@@ -13,13 +13,14 @@ from __future__ import annotations
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from swarm_trading.core.models import ExecutedTrade
-from swarm_trading.data.historic.db_models import AgentORM, Base, SwarmSnapshotORM, TradeORM
+from swarm_trading.data.historic.db_models import AgentORM, SwarmSnapshotORM, TradeORM
 
 # Rows/snapshots serialize to plain JSON-able dicts (str/float/int/None
 # values) for the dashboard API — not worth a dataclass per shape here.
@@ -81,12 +82,19 @@ class AsyncRepository:
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Creates tables if they don't exist yet. Left to raise on failure —
-        callers (main.py) decide whether a dead DB at startup should be
-        treated as fatal or degrade to repository=None."""
-        async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info(f"[Repository] Initialized ({self._engine.dialect.name})")
+        """Validates connectivity only — does NOT create or modify schema.
+        Alembic (`alembic upgrade head`) is the sole schema authority; see
+        docs/architecture/adr/0008-postgresql-alembic-schema-authority.md.
+        Left to raise on failure — callers (main.py) decide whether a dead DB
+        at startup should be treated as fatal or degrade to repository=None."""
+        try:
+            async with self._engine.begin() as conn:
+                await conn.execute(text("SELECT 1"))
+        except SQLAlchemyError as exc:
+            raise ConnectionError(
+                f"[Repository] Could not connect to the database ({self._engine.dialect.name}): {exc}"
+            ) from exc
+        logger.info(f"[Repository] Connectivity OK ({self._engine.dialect.name})")
 
     async def save_trade(self, trade: ExecutedTrade) -> None:
         try:
