@@ -42,6 +42,17 @@ Antes de implementar, se revisó `alembic/env.py` completo para verificar si Ale
 - No hay Docker ni Postgres disponibles en el entorno de desarrollo local usado para esta fase — la primera validación real contra un `postgres:16` de verdad ocurre en CI (`.github/workflows/ci.yml`, job `postgres-integration`), no localmente. Esto es un riesgo residual documentado, no oculto: si CI pasa en verde, es la primera confirmación end-to-end real.
 - Un operador que arranque `docker compose up` sin antes correr `docker compose run --rm migrate` obtiene una app que arranca (la conectividad es válida) pero cuyas lecturas/escrituras fallarán o devolverán vacío contra tablas inexistentes — es el comportamiento correcto (fallar visible, no auto-crear), pero requiere que el paso de migración esté documentado y no se salte. Mitigado documentando el flujo exacto en `README.md`.
 - `swarm_data` (el volumen SQLite anterior) se eliminó de `docker-compose.yml` — cualquier despliegue previo que dependiera de ese archivo debe migrar sus datos manualmente antes de actualizar (no hay migración de datos SQLite→Postgres automatizada; fuera de alcance de esta fase, que es sobre el esquema, no sobre backfill de datos históricos).
+- `swarm.depends_on` en `docker-compose.yml` solo exige que `postgres` esté saludable, no que `migrate` haya corrido — Compose no tiene forma de expresar "espera a un servicio de perfil `tools`" sin acoplar su ciclo de vida al de `swarm`. La secuencia correcta (`postgres` → `migrate` → `swarm`) depende de que el operador siga `make docker-up` o el orden documentado en `README.md`, no de un enforcement mecánico de Compose. Es la misma situación que el punto anterior, no un problema nuevo.
+
+## Rollback operativo
+
+**Revertir el código a un estado anterior:** mientras esta rama no esté mergeada a `main`, revertir es simplemente no mergear el PR. Si ya se mergeó y hace falta deshacerlo, usar `git revert` del commit de merge — nunca `git reset --hard` sobre `main`. Revertir código no toca el esquema de Postgres por sí solo: Alembic solo actúa cuando alguien ejecuta `alembic upgrade`/`downgrade` explícitamente, así que un rollback de código con un esquema ya migrado hacia adelante puede dejar columnas/tablas de más que el código viejo simplemente ignora (no rompe, salvo que la migración también haya sido destructiva — ver más abajo).
+
+**Si una migración futura falla en producción:**
+1. `alembic current` para confirmar la revisión realmente aplicada — cada migración corre en su propia transacción en Postgres, así que un fallo a mitad de una revisión no la deja "parcialmente aplicada"; pero si esa misma corrida ya había completado revisiones previas, esas sí quedan aplicadas.
+2. Si la revisión fallida no quedó registrada en `alembic_version`, corregir la migración (nunca editar una migración ya aplicada en otro entorno — ver "Principios obligatorios" de esta fase) y volver a correr `alembic upgrade head`.
+3. Si hace falta revertir el esquema, `alembic downgrade <revision_anterior>` — cada migración debe mantener un `downgrade()` funcional (ver `alembic/versions/*`); la reversibilidad se verifica en CI (`postgres-integration`: `downgrade -1` + re-upgrade).
+4. `swarm` no se reinicia automáticamente tras un fallo de migración — el operador decide cuándo repetir `make migrate` y solo entonces levantar `swarm` (ver punto anterior sobre por qué esto no está forzado por Compose).
 
 ## Consecuencias
 

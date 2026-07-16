@@ -66,7 +66,15 @@ docker compose run --rm swarm alembic check     # models vs. migrations drift
 
 # Create a new migration after changing data/historic/db_models.py:
 make makemigrations msg="describe the schema change"
+
+# If a migration fails, revert to a previous revision (each migration keeps
+# a working downgrade()):
+docker compose run --rm swarm alembic downgrade <previous_revision>
 ```
+
+See [ADR-0008's "Rollback operativo"](docs/architecture/adr/0008-postgresql-alembic-schema-authority.md#rollback-operativo)
+for the full operational rollback procedure (reverting code vs. reverting
+schema, what to do when a migration fails partway).
 
 If you land on a database with **no migrations applied** (a fresh Postgres,
 or one Alembic has never touched), the app will start (connectivity is
