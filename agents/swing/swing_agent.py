@@ -9,6 +9,7 @@ Wider ATR-based SL/TP than ScalperAgent since it rides bigger moves.
 Each instance gets a slightly jittered ADX threshold so the whole swing
 cohort doesn't fire (or all sit out) on the exact same bar — no cascade failure.
 """
+
 from __future__ import annotations
 
 import random
@@ -17,7 +18,13 @@ from loguru import logger
 
 from swarm_trading.agents.base.base_agent import BaseAgent
 from swarm_trading.core.models import (
-    AgentType, Candle, ExecutedTrade, MarketState, OrderProposal, Side, Symbol,
+    AgentType,
+    Candle,
+    ExecutedTrade,
+    MarketState,
+    OrderProposal,
+    Side,
+    Symbol,
 )
 
 
@@ -104,10 +111,7 @@ class SwingAgent(BaseAgent):
             tp_price=round(tp_price, 5),
             confidence=round(min(1.0, adx / 100), 3),
             price=close,
-            reason=(
-                f"EMA{self.ema_fast}={ema_fast:.5f} EMA{self.ema_slow}={ema_slow:.5f} "
-                f"ADX={adx:.2f} ATR={atr:.5f}"
-            ),
+            reason=(f"EMA{self.ema_fast}={ema_fast:.5f} EMA{self.ema_slow}={ema_slow:.5f} ADX={adx:.2f} ATR={atr:.5f}"),
         )
         logger.info(
             f"[{self.agent_id}] Signal {side.value} {self.symbol.value} @ {close:.5f} "
@@ -175,7 +179,7 @@ class SwingAgent(BaseAgent):
         minus_dm_s = wilder_smooth(minus_dm)
 
         dx: list[float] = []
-        for tr_v, pdm_v, mdm_v in zip(tr_s, plus_dm_s, minus_dm_s):
+        for tr_v, pdm_v, mdm_v in zip(tr_s, plus_dm_s, minus_dm_s, strict=True):
             if tr_v == 0:
                 dx.append(0.0)
                 continue

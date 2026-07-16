@@ -14,10 +14,17 @@ MarketState.indicators, this agent will just see the .get(..., 0) defaults
 and stay dormant (never propose a trade). See BaseAgent/SwarmOrchestrator
 if you want to wire that up.
 """
+
 from __future__ import annotations
+
 from swarm_trading.agents.base.base_agent import BaseAgent
 from swarm_trading.core.models import (
-    AgentType, ExecutedTrade, MarketState, OrderProposal, Side, Symbol,
+    AgentType,
+    ExecutedTrade,
+    MarketState,
+    OrderProposal,
+    Side,
+    Symbol,
 )
 
 SWARM_IMBALANCE_THRESHOLD = 7
@@ -53,7 +60,7 @@ class HedgerAgent(BaseAgent):
         if long_count > SWARM_IMBALANCE_THRESHOLD:
             side = Side.SHORT  # too many longs — hedge by shorting
         elif short_count > SWARM_IMBALANCE_THRESHOLD:
-            side = Side.LONG   # too many shorts — hedge by going long
+            side = Side.LONG  # too many shorts — hedge by going long
 
         if side is None:
             return None

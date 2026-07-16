@@ -1,6 +1,8 @@
 """Unit tests for SwingAgent (EMA fast/slow crossover + ADX trend filter)."""
-import pytest
+
 from datetime import datetime
+
+import pytest
 
 from swarm_trading.agents.swing.swing_agent import SwingAgent
 from swarm_trading.core.models import Candle, MarketState, Side, Symbol
@@ -8,8 +10,13 @@ from swarm_trading.core.models import Candle, MarketState, Side, Symbol
 
 def _state(ema_fast, ema_slow, adx, close, atr=1.0, news_blackout=False):
     candle = Candle(
-        symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(),
-        open=close, high=close, low=close, close=close, volume=1.0,
+        symbol=Symbol.XAUUSD,
+        timestamp=datetime.utcnow(),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=1.0,
     )
     return MarketState(
         symbol=Symbol.XAUUSD,

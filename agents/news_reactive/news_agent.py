@@ -2,12 +2,20 @@
 News-Reactive Agent — only activates around high-impact news events.
 Trades the initial momentum spike after major releases (NFP, CPI, FOMC, etc.).
 """
+
 from __future__ import annotations
-from datetime import datetime, timedelta
+
+from datetime import datetime
+
 from swarm_trading.agents.base.base_agent import BaseAgent
 from swarm_trading.core.models import (
-    AgentType, ExecutedTrade, MarketState, NewsImpact,
-    OrderProposal, Side, Symbol,
+    AgentType,
+    ExecutedTrade,
+    MarketState,
+    NewsImpact,
+    OrderProposal,
+    Side,
+    Symbol,
 )
 
 
@@ -17,7 +25,7 @@ class NewsReactiveAgent(BaseAgent):
         symbol: Symbol,
         initial_capital: float = 1.0,
         entry_window_seconds: int = 30,  # seconds after news to enter
-        hold_candles: int = 5,           # how many candles to hold max
+        hold_candles: int = 5,  # how many candles to hold max
         **kwargs,
     ):
         super().__init__(symbol=symbol, agent_type=AgentType.NEWS_REACTIVE, initial_capital=initial_capital, **kwargs)
@@ -40,11 +48,11 @@ class NewsReactiveAgent(BaseAgent):
             if 0 <= delta <= self.entry_window_seconds:
                 ind = market_state.indicators
                 close = market_state.candles[-1].close
-                atr   = ind.get("atr_14", close * 0.001)
+                atr = ind.get("atr_14", close * 0.001)
 
                 # Simple momentum: direction from close vs EMA20
                 ema20 = ind.get("ema_20", close)
-                side  = Side.LONG if close > ema20 else Side.SHORT
+                side = Side.LONG if close > ema20 else Side.SHORT
 
                 sl_price = close - atr * 2 if side == Side.LONG else close + atr * 2
                 tp_price = close + atr * 4 if side == Side.LONG else close - atr * 4

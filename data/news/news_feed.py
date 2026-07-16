@@ -2,27 +2,38 @@
 NewsFeed — provides economic calendar events to the orchestrator.
 Sources: ForexFactory RSS (free), NewsAPI (production).
 """
+
 from __future__ import annotations
+
+import asyncio
 from datetime import datetime, timedelta
+from typing import TypedDict
+
 from loguru import logger
 
 from swarm_trading.core.models import NewsEvent, NewsImpact, Symbol
 
-
 SYMBOL_CURRENCY_MAP = {
     "XAUUSD": ["USD", "XAU"],
-    "PLTR":   ["USD"],
+    "PLTR": ["USD"],
     "NAS100": ["USD"],
-    "US100":  ["USD"],
-    "OIL":    ["USD"],
+    "US100": ["USD"],
+    "OIL": ["USD"],
 }
 
+
+class _DemoEvent(TypedDict):
+    title: str
+    impact: NewsImpact
+    currency: str
+
+
 # Static high-impact events as fallback/demo
-DEMO_EVENTS: list[dict] = [
+DEMO_EVENTS: list[_DemoEvent] = [
     {"title": "FOMC Rate Decision", "impact": NewsImpact.HIGH, "currency": "USD"},
-    {"title": "Non-Farm Payrolls",   "impact": NewsImpact.HIGH, "currency": "USD"},
-    {"title": "CPI m/m",             "impact": NewsImpact.HIGH, "currency": "USD"},
-    {"title": "GDP q/q",             "impact": NewsImpact.MEDIUM, "currency": "USD"},
+    {"title": "Non-Farm Payrolls", "impact": NewsImpact.HIGH, "currency": "USD"},
+    {"title": "CPI m/m", "impact": NewsImpact.HIGH, "currency": "USD"},
+    {"title": "GDP q/q", "impact": NewsImpact.MEDIUM, "currency": "USD"},
 ]
 
 
@@ -37,9 +48,9 @@ class NewsFeed:
         currencies = SYMBOL_CURRENCY_MAP.get(symbol.value, ["USD"])
         now = datetime.utcnow()
         return [
-            e for e in self._events
-            if e.currency in currencies
-            and (e.timestamp - now).total_seconds() <= horizon_hours * 3600
+            e
+            for e in self._events
+            if e.currency in currencies and (e.timestamp - now).total_seconds() <= horizon_hours * 3600
         ]
 
     async def is_blackout(self, symbol: Symbol, blackout_min: int = 5) -> bool:
@@ -78,15 +89,20 @@ class NewsFeed:
         """Parse ForexFactory calendar RSS feed."""
         try:
             import feedparser
-            feed = feedparser.parse("https://www.forexfactory.com/ffcal_week_this.xml")
+
+            # feedparser.parse() does synchronous network I/O — see
+            # docs/architecture/adr/0002-async-io-blocking-calls-must-use-executor.md
+            feed = await asyncio.to_thread(feedparser.parse, "https://www.forexfactory.com/ffcal_week_this.xml")
             events = []
             for entry in feed.entries:
-                events.append(NewsEvent(
-                    timestamp=datetime.utcnow(),  # parse entry.published properly
-                    title=entry.get("title", ""),
-                    impact=NewsImpact.HIGH,
-                    currency=entry.get("ff_country", "USD"),
-                ))
+                events.append(
+                    NewsEvent(
+                        timestamp=datetime.utcnow(),  # parse entry.published properly
+                        title=entry.get("title", ""),
+                        impact=NewsImpact.HIGH,
+                        currency=entry.get("ff_country", "USD"),
+                    )
+                )
             self._events = events
         except Exception as e:
             logger.warning(f"[NewsFeed] ForexFactory fetch failed: {e}")

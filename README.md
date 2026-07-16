@@ -1,6 +1,6 @@
 # 🐝 Swarm Trading — 100 Independent AI Agents
 
-> Each agent starts with **$1 and targets $10**. All 100 agents run concurrently, 
+> Each agent starts with **$1 and targets $10**. All 100 agents run concurrently,
 > independently, and safely — a single agent failure never cascades to others.
 
 ---
@@ -43,7 +43,7 @@ open http://localhost:8000/docs
 python core/mcp_server.py
 ```
 
-Available tools: `get_swarm_summary`, `list_agents`, `halt_swarm`, 
+Available tools: `get_swarm_summary`, `list_agents`, `halt_swarm`,
 `resume_swarm`, `pause_agent_type`, `get_agent_metrics`
 
 ## Dashboard endpoints

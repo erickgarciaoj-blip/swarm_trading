@@ -1,13 +1,21 @@
 """Abstract base class for all 100 trading agents."""
+
 from __future__ import annotations
+
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
+
 from loguru import logger
 
+from swarm_trading.core.config import settings
 from swarm_trading.core.models import (
-    AgentMetrics, AgentStatus, AgentType, ExecutedTrade,
-    MarketState, OrderProposal, Side, Symbol,
+    AgentMetrics,
+    AgentStatus,
+    AgentType,
+    ExecutedTrade,
+    MarketState,
+    OrderProposal,
+    Symbol,
 )
 
 
@@ -40,7 +48,9 @@ class BaseAgent(ABC):
         self._max_equity: float = initial_capital
         self._trade_history: list[ExecutedTrade] = []
 
-        logger.info(f"[{self.agent_id}] Initialized | capital=${initial_capital:.2f} | target=${self.target_equity:.2f}")
+        logger.info(
+            f"[{self.agent_id}] Initialized | capital=${initial_capital:.2f} | target=${self.target_equity:.2f}"
+        )
 
     # ─── Abstract interface ───────────────────────────────────────────────────
 
@@ -61,8 +71,9 @@ class BaseAgent(ABC):
     # ─── Common lifecycle methods ─────────────────────────────────────────────
 
     def calc_notional(self, price: float, risk_pct: float = 0.02) -> float:
-        """Retorna USD-notional a arriesgar en este trade."""
-        return round(self.equity * risk_pct, 4)
+        """Retorna USD-notional a arriesgar en este trade, acotado a [risk_min_entry_pct, risk_max_entry_pct]."""
+        clamped_pct = max(settings.risk_min_entry_pct, min(settings.risk_max_entry_pct, risk_pct))
+        return round(self.equity * clamped_pct, 4)
 
     def update_equity(self, new_equity: float) -> None:
         self.equity = new_equity
@@ -100,6 +111,7 @@ class BaseAgent(ABC):
             return 0.0
         pnls = [t.pnl for t in self._trade_history]
         import statistics
+
         avg = statistics.mean(pnls)
         std = statistics.stdev(pnls)
         return round(avg / std if std else 0.0, 3)

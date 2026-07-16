@@ -1,16 +1,21 @@
 """Unit tests for HedgerAgent (swarm-imbalance hedging, no price signal)."""
-import pytest
+
 from datetime import datetime
+
+import pytest
 
 from swarm_trading.agents.hedger.hedger_agent import HedgerAgent
 from swarm_trading.core.models import Candle, MarketState, Side, Symbol
 
 
 def _state(long_count=0, short_count=0, atr=2.0, close=1900.0, news_blackout=False):
-    candle = Candle(symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(),
-                     open=close, high=close, low=close, close=close, volume=1.0)
+    candle = Candle(
+        symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(), open=close, high=close, low=close, close=close, volume=1.0
+    )
     return MarketState(
-        symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(), candles=[candle],
+        symbol=Symbol.XAUUSD,
+        timestamp=datetime.utcnow(),
+        candles=[candle],
         indicators={"atr_14": atr, "swarm_long_count": long_count, "swarm_short_count": short_count},
         is_news_blackout=news_blackout,
     )
@@ -56,7 +61,10 @@ async def test_news_blackout_blocks_signal():
 
 
 @pytest.mark.asyncio
-async def test_quantity_is_one_percent_of_equity():
+async def test_quantity_is_clamped_to_min_entry_pct():
+    # HedgerAgent requests risk_pct=0.01, below the swarm-wide 3% floor,
+    # so BaseAgent.calc_notional clamps it up to risk_min_entry_pct.
     agent = HedgerAgent(symbol=Symbol.XAUUSD, initial_capital=50.0)
     proposal = await agent.analyze(_state(long_count=8, short_count=0))
-    assert proposal.quantity == pytest.approx(0.5)
+    assert proposal is not None
+    assert proposal.quantity == pytest.approx(1.5)

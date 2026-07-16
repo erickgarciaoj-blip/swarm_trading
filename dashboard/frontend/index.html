@@ -221,12 +221,20 @@
       <span id="stat-equity" class="value">—</span>
     </div>
     <div class="stat">
+      <span class="label">PnL Flotante</span>
+      <span id="stat-floating-pnl" class="value">—</span>
+    </div>
+    <div class="stat">
       <span class="label">PnL del día</span>
       <span id="stat-daily-pnl" class="value">—</span>
     </div>
     <div class="stat">
       <span class="label">Agentes activos</span>
       <span id="stat-active" class="value">—</span>
+    </div>
+    <div class="stat">
+      <span class="label">Uptime</span>
+      <span id="stat-uptime" class="value">—</span>
     </div>
 
     <div class="spacer"></div>
@@ -257,7 +265,7 @@
     </section>
 
     <section class="panel">
-      <div class="panel-title"><span>Curva de equity (últimos 60 puntos)</span></div>
+      <div class="panel-title"><span>Curva de equity — histórico completo (incl. PnL flotante)</span></div>
       <div id="chart-wrap"><canvas id="equity-chart"></canvas></div>
     </section>
   </main>
@@ -281,7 +289,13 @@
     <h2 id="drawer-title">Detalle de agente</h2>
     <button id="drawer-close" class="drawer-close" aria-label="Cerrar">&times;</button>
   </div>
-  <div class="drawer-body" id="drawer-body"></div>
+  <div class="drawer-body" id="drawer-body">
+    <div class="detail-grid" id="drawer-detail-grid"></div>
+    <p class="drawer-section-title">Curva de equity (histórico completo)</p>
+    <div id="drawer-chart-wrap" style="height:140px; margin-bottom:20px;"><canvas id="drawer-equity-chart"></canvas></div>
+    <p class="drawer-section-title">Últimos trades</p>
+    <div id="drawer-trades"></div>
+  </div>
 </aside>
 
 <script>
@@ -290,49 +304,86 @@
   const fmtMoney = (n) => (n == null ? "—" : "$" + Number(n).toFixed(2));
   const fmtPct   = (n) => (n == null ? "—" : (Number(n) * 100).toFixed(1) + "%");
   const fmtTime  = (iso) => (iso ? new Date(iso).toLocaleTimeString() : "—");
+  const fmtDate  = (iso) => (iso ? new Date(iso).toLocaleString() : "—");
   const fmtNum   = (n, d = 3) => (n == null ? "—" : Number(n).toFixed(d));
+  const fmtDuration = (sec) => {
+    if (sec == null) return "—";
+    sec = Math.max(0, Math.floor(sec));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+  };
 
   // Latest agent rows keyed by id (type/symbol aren't in /agents/{id}/metrics,
   // so the drawer reads those from the last WebSocket snapshot instead).
   let latestAgents = {};
   let selectedAgentId = null;
 
-  // ── Equity chart ────────────────────────────────────────────────────
-  const MAX_POINTS = 60;
-  const chartCtx = $("equity-chart").getContext("2d");
-  const equityChart = new Chart(chartCtx, {
-    type: "line",
-    data: {
-      labels: [],
-      datasets: [{
-        label: "Total Equity",
-        data: [],
-        borderColor: "#3fd68c",
-        backgroundColor: "rgba(63,214,140,0.08)",
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.25,
-        fill: true,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      scales: {
-        x: { ticks: { color: "#6b7686", maxTicksLimit: 6 }, grid: { color: "#1f2937" } },
-        y: { ticks: { color: "#6b7686" }, grid: { color: "#1f2937" } },
+  // Once history has been backfilled from /swarm/history, live WS ticks just
+  // keep appending — no cap, this chart is meant to span the swarm's full life.
+  let historyLoaded = false;
+
+  // No chartjs date adapter is loaded, so timestamps go in as pre-formatted
+  // category labels (like the original 60-point chart did) rather than a
+  // "time" scale — that keeps this dependency-free.
+  function makeLineChart(canvasId, color) {
+    return new Chart($(canvasId).getContext("2d"), {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [{
+          label: "Equity",
+          data: [],
+          borderColor: color,
+          backgroundColor: color + "14",
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.15,
+          fill: true,
+        }],
       },
-      plugins: { legend: { display: false } },
-    },
-  });
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        scales: {
+          x: { ticks: { color: "#6b7686", maxTicksLimit: 6 }, grid: { color: "#1f2937" } },
+          y: { ticks: { color: "#6b7686" }, grid: { color: "#1f2937" } },
+        },
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+
+  // ── Equity chart (full history) ────────────────────────────────────
+  const equityChart = makeLineChart("equity-chart", "#3fd68c");
+
+  async function loadEquityHistory() {
+    try {
+      const res = await fetch("/swarm/history");
+      const snapshots = await res.json();
+      if (Array.isArray(snapshots) && snapshots.length) {
+        equityChart.data.labels = snapshots.map((s) => fmtDate(s.timestamp));
+        equityChart.data.datasets[0].data = snapshots.map((s) => s.total_equity);
+        equityChart.update("none");
+      }
+    } catch (e) {
+      console.error("failed to load /swarm/history", e);
+    } finally {
+      historyLoaded = true;
+    }
+  }
+  loadEquityHistory();
 
   function pushEquityPoint(ts, equity) {
+    // Skip live ticks until the full-history backfill lands, so a live point
+    // never gets appended before (and out of order relative to) the history.
+    if (!historyLoaded) return;
     const labels = equityChart.data.labels;
     const data = equityChart.data.datasets[0].data;
-    labels.push(new Date(ts).toLocaleTimeString());
+    labels.push(fmtDate(ts));
     data.push(equity);
-    if (labels.length > MAX_POINTS) { labels.shift(); data.shift(); }
     equityChart.update("none");
   }
 
@@ -345,11 +396,18 @@
     const swarm = msg.swarm || {};
 
     $("stat-equity").textContent = fmtMoney(swarm.total_equity);
+
+    const floating = swarm.floating_pnl;
+    const floatingEl = $("stat-floating-pnl");
+    floatingEl.textContent = fmtMoney(floating);
+    floatingEl.className = "value " + (floating > 0 ? "pos" : floating < 0 ? "neg" : "");
+
     const pnl = swarm.daily_pnl;
     const pnlEl = $("stat-daily-pnl");
     pnlEl.textContent = fmtMoney(pnl);
     pnlEl.className = "value " + (pnl > 0 ? "pos" : pnl < 0 ? "neg" : "");
     $("stat-active").textContent = swarm.active_agents ?? "—";
+    $("stat-uptime").textContent = fmtDuration(swarm.uptime_seconds);
 
     const envBadge = $("badge-env");
     const isLive = (msg.app_env === "live");
@@ -446,26 +504,38 @@
     markSelectedRow();
   }
 
-  function renderAgentDetail(agentId, metrics, trades) {
+  // Drawer's own chart — created once, data swapped per agent selection.
+  const drawerEquityChart = makeLineChart("drawer-equity-chart", "#4fa3ff");
+
+  function renderAgentDetail(agentId, metrics, trades, curve) {
     const row = latestAgents[agentId] || {};
     const rows = [
-      ["ID",           metrics.agent_id ?? agentId],
-      ["Tipo",         row.type ?? "—"],
-      ["Símbolo",      row.symbol ?? "—"],
-      ["Equity",       fmtMoney(metrics.equity)],
-      ["Win Rate",     fmtPct(metrics.win_rate)],
-      ["Sharpe",       fmtNum(metrics.sharpe)],
-      ["Max Drawdown", fmtPct(metrics.max_drawdown)],
-      ["Trades",       metrics.total_trades ?? "—"],
-      ["Status",       metrics.status ?? "—"],
+      ["ID",             metrics.agent_id ?? agentId],
+      ["Tipo",           row.type ?? "—"],
+      ["Símbolo",        row.symbol ?? "—"],
+      ["Equity",         fmtMoney(metrics.equity)],
+      ["Equity Realizado", fmtMoney(metrics.realized_equity)],
+      ["PnL Flotante",   fmtMoney(metrics.floating_pnl)],
+      ["Win Rate",       fmtPct(metrics.win_rate)],
+      ["Sharpe",         fmtNum(metrics.sharpe)],
+      ["Max Drawdown",   fmtPct(metrics.max_drawdown)],
+      ["Trades",         metrics.total_trades ?? "—"],
+      ["Status",         metrics.status ?? "—"],
     ];
-    const detailHtml = `
-      <div class="detail-grid">
-        ${rows.map(([label, value]) => `<div class="dt">${label}</div><div class="dd">${value}</div>`).join("")}
-      </div>
-    `;
+    $("drawer-detail-grid").innerHTML = rows.map(([label, value]) =>
+      `<div class="dt">${label}</div><div class="dd">${value}</div>`
+    ).join("");
 
-    const tradesHtml = !trades.length
+    if (curve && curve.length) {
+      drawerEquityChart.data.labels = curve.map((p) => fmtDate(p.timestamp));
+      drawerEquityChart.data.datasets[0].data = curve.map((p) => p.equity);
+    } else {
+      drawerEquityChart.data.labels = [];
+      drawerEquityChart.data.datasets[0].data = [];
+    }
+    drawerEquityChart.update("none");
+
+    $("drawer-trades").innerHTML = !trades.length
       ? '<div class="empty">Sin trades registrados</div>'
       : `
         <table>
@@ -485,33 +555,30 @@
           </tbody>
         </table>
       `;
-
-    $("drawer-body").innerHTML = `
-      ${detailHtml}
-      <p class="drawer-section-title">Últimos trades</p>
-      ${tradesHtml}
-    `;
   }
 
   async function loadAgentDetail(agentId) {
     $("drawer-title").textContent = agentId;
-    $("drawer-body").innerHTML = '<div class="empty">Cargando…</div>';
+    $("drawer-detail-grid").innerHTML = '<div class="empty">Cargando…</div>';
+    $("drawer-trades").innerHTML = "";
 
     try {
-      const [metricsRes, tradesRes] = await Promise.all([
+      const [metricsRes, tradesRes, curveRes] = await Promise.all([
         fetch(`/agents/${encodeURIComponent(agentId)}/metrics`),
         fetch(`/agents/${encodeURIComponent(agentId)}/trades?limit=10`),
+        fetch(`/agents/${encodeURIComponent(agentId)}/equity_curve`),
       ]);
       if (agentId !== selectedAgentId) return; // user clicked another row meanwhile
 
       const metrics = await metricsRes.json();
       if (!metricsRes.ok || metrics.error) throw new Error(metrics.error || "request failed");
       const trades = await tradesRes.json();
+      const curve = await curveRes.json();
 
-      renderAgentDetail(agentId, metrics, Array.isArray(trades) ? trades : []);
+      renderAgentDetail(agentId, metrics, Array.isArray(trades) ? trades : [], Array.isArray(curve) ? curve : []);
     } catch (e) {
       if (agentId !== selectedAgentId) return;
-      $("drawer-body").innerHTML = '<div class="empty">No se pudo cargar métricas de este agente</div>';
+      $("drawer-detail-grid").innerHTML = '<div class="empty">No se pudo cargar métricas de este agente</div>';
     }
   }
 

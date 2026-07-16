@@ -1,18 +1,22 @@
 """Unit tests for the dashboard's WebSocketManager (dashboard/websocket/ws_handler.py)."""
+
+from typing import Any
+
 import pytest
+
 from swarm_trading.dashboard.websocket.ws_handler import WebSocketManager
 
 
 class _FakeWebSocket:
     def __init__(self, fail_send=False):
         self.accepted = False
-        self.sent: list[dict] = []
+        self.sent: list[dict[str, Any]] = []
         self._fail_send = fail_send
 
     async def accept(self):
         self.accepted = True
 
-    async def send_json(self, message: dict):
+    async def send_json(self, message: dict[str, Any]):
         if self._fail_send:
             raise RuntimeError("connection reset")
         self.sent.append(message)

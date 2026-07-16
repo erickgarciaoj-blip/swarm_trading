@@ -1,4 +1,5 @@
 """Central configuration using Pydantic-Settings. All values come from .env."""
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -39,25 +40,28 @@ class SwarmSettings(BaseSettings):
     telegram_chat_id: str = ""
 
     # Swarm
-    swarm_total_capital_usd: float = 1000.0
+    swarm_total_capital_usd: float = 100_000.0
     swarm_agent_count: int = 100
-    swarm_capital_per_agent: float = 10.0
+    swarm_capital_per_agent: float = 1_000.0
     swarm_target_multiplier: float = 10.0
 
     # Risk (FTMO-style)
     risk_max_total_loss_pct: float = 0.50
     risk_max_agents_per_symbol: int = 10
     risk_news_blackout_min: int = 5
+    risk_min_entry_pct: float = 0.03
+    risk_max_entry_pct: float = 0.15
 
     # Dashboard
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8000
 
     # RL agents (agents/rl)
+    # rl_model_dir is where RLAgent loads checkpoints from (inference only —
+    # see docs/architecture/adr/0001-rl-inference-only-in-production.md) and
+    # where the offline `agents/rl/train.py` script saves them to.
     rl_model_dir: str = "agents/rl/checkpoints"
-    rl_retrain_every_n_trades: int = 20
     rl_pretrain_timesteps: int = 20_000
-    rl_incremental_timesteps: int = 2_000
 
 
 settings = SwarmSettings()

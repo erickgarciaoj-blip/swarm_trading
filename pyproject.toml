@@ -12,11 +12,103 @@ authors = [{ name = "Erick García" }]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--cov=. --cov-report=term-missing --cov-config=pyproject.toml"
 
 [tool.ruff]
 line-length = 120
 target-version = "py311"
 
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear (common real bugs: mutable defaults, bare except, etc.)
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    # This codebase's comments/docstrings deliberately use em dashes (—) as a
+    # stylistic convention throughout — not a typo to "fix" file by file.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["swarm_trading"]
+
+[tool.ruff.format]
+quote-style = "double"
+
 [tool.mypy]
+# Matches requires-python in [project] — the real floor this project
+# supports. (Earlier pinned to numpy 2.5.x, whose bundled .pyi stubs used
+# PEP 695 `type` statements requiring 3.12+ to parse; numpy 2.5 also turned
+# out to have dropped Python 3.11 wheels entirely — see ADR-0005 — so the
+# numpy pin came back down to 2.4.6 and this reverted to the real target.)
 python_version = "3.11"
 strict = true
+# Alembic's own migration scaffold (auto-generated, not hand-maintained
+# business logic) — also avoids the "found twice under different module
+# names" clash from this repo's root package literally being named
+# `swarm_trading` (see PYTHONPATH note in docs/architecture/adr/0002).
+exclude = ["^alembic/"]
+# Permanently relaxed (not a temporary ratchet — see
+# docs/architecture/adr/0004-mypy-strict-baseline.md): untyped internal
+# helpers (mostly test fixtures) are common and harmless enough that
+# requiring an annotation on every single one isn't worth the churn. Every
+# other strict check stays on; the codebase is at zero mypy errors.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = true
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+# Test doubles (fakes/stubs) intentionally duck-type against real interfaces
+# (BrokerInterface, WebSocket, ...) rather than subclassing them — that's a
+# deliberate, common testing pattern, not a type-safety gap in application
+# code. Application code (everything outside tests/) still gets full
+# arg-type checking.
+module = ["swarm_trading.tests.*"]
+# func-returns-value: several tests use `list.append(x) or awaitable()` as a
+# terse "record the call, then return the real result" idiom in lambdas —
+# intentional, not a bug.
+disable_error_code = ["arg-type", "assignment", "comparison-overlap", "func-returns-value"]
+
+[[tool.mypy.overrides]]
+# Third-party packages without type stubs — see individual modules' lazy
+# imports (agents/rl/*, brokers/mt5/*) for why these are optional deps.
+module = [
+    "yfinance.*",
+    "feedparser.*",
+    "pandas_market_calendars.*",
+    "stable_baselines3.*",
+    "gymnasium.*",
+    "MetaTrader5.*",
+    "ibapi.*",
+    "mcp.*",
+]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "*/.venv/*",
+    "tests/*",
+    "alembic/*",
+    "agents/rl/train.py",   # offline script, not covered by unit tests
+    "core/mcp_server.py",   # thin MCP glue, exercised manually via Claude Code
+    "main.py",              # process entrypoint, exercised by running the app
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+fail_under = 65

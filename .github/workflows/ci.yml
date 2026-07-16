@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No deploy job here on purpose (see ARCHITECTURE_REVIEW.md — Fase 2 scope
+# is quality gates only, deploy stays manual until it's explicitly asked for).
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      # path: swarm_trading — the app imports itself as `swarm_trading.*`,
+      # which only resolves if the checkout directory is literally named
+      # that (see docs/architecture/adr/0002). GitHub normally checks out
+      # into a dir named after the repo, which may not match, so this pins
+      # it regardless of what the repo itself is called.
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: swarm_trading/requirements-dev.txt
+      - run: pip install -r swarm_trading/requirements-dev.txt
+      - name: ruff check
+        run: cd swarm_trading && ruff check .
+      - name: ruff format --check
+        run: cd swarm_trading && ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: swarm_trading/requirements-dev.txt
+      - run: pip install -r swarm_trading/requirements-dev.txt
+      - name: mypy
+        working-directory: swarm_trading
+        run: PYTHONPATH="$GITHUB_WORKSPACE" mypy --config-file pyproject.toml .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is requires-python's actual floor (see pyproject.toml); 3.13
+        # is what's used day-to-day in dev. Both must genuinely work — this
+        # is what caught numpy 2.5.x silently having dropped 3.11 wheels
+        # during Fase 2's dependency audit (see ADR-0005), a class of break
+        # a single-version job would never have surfaced.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: swarm_trading/requirements-dev.txt
+      - run: pip install -r swarm_trading/requirements-dev.txt
+      - name: pip check (no conflicting/missing transitive dependencies)
+        run: pip check
+      - name: pytest + coverage
+        working-directory: swarm_trading
+        run: PYTHONPATH="$GITHUB_WORKSPACE" pytest tests/ -v
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.python-version == env.PYTHON_VERSION
+        with:
+          name: coverage-html
+          path: swarm_trading/htmlcov/
+          retention-days: 14
+
+  alembic-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: swarm_trading/requirements-dev.txt
+      - run: pip install -r swarm_trading/requirements-dev.txt
+      - name: Migrations apply cleanly on a fresh DB
+        working-directory: swarm_trading
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:///./ci_alembic_check.db"
+        run: PYTHONPATH="$GITHUB_WORKSPACE" alembic upgrade head
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+      - name: Build production image
+        run: docker build -t swarm-trading:ci swarm_trading

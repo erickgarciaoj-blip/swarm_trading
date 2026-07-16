@@ -1,26 +1,36 @@
 # Core async & runtime
-asyncio-throttle==1.0.2
-aiohttp==3.9.5
-aiofiles==23.2.1
-uvicorn[standard]==0.30.6  # mcp==1.2.0 requires uvicorn>=0.30
-fastapi==0.111.0
+# asyncio-throttle, aiohttp, aiofiles, ccxt and typer were previously pinned
+# here but are never imported anywhere in this codebase (verified by grep
+# during Fase 2's dependency audit) — removed as dead weight, same reasoning
+# as TA-Lib/scikit-learn/xgboost below. Re-add if a feature starts using one.
+uvicorn[standard]==0.51.0  # mcp==1.2.0 requires uvicorn>=0.30
+fastapi==0.139.0
 
 # Data
-pandas==2.2.2
-numpy==1.26.4
-# TA-Lib wraps the native ta-lib C library — on macOS (incl. Apple Silicon)
-# install it with Homebrew first: see scripts/install_macos.sh.
-TA-Lib>=0.4.28
-yfinance==0.2.40
-polygon-api-client==1.14.2
+pandas==3.0.3
+# numpy 2.5.0/2.5.1 dropped Python 3.11 wheels (cp312+ only) — this project
+# targets >=3.11 (see pyproject.toml), so 2.4.6 (latest with a cp311 wheel)
+# is the real ceiling here, not "latest overall". Verified via
+# `pip download --python-version 3.11 --only-binary :all:
+# --platform manylinux_2_28_x86_64 numpy==<version>` during Fase 2's
+# dependency audit — see ADR-0005.
+numpy==2.4.6
+# TA-Lib, scikit-learn and xgboost were previously pinned here too — same
+# story: every indicator (RSI/ATR/EMA/ADX) is computed by hand in
+# data/feeds/market_feed.py / agents/swing/swing_agent.py precisely to avoid
+# the TA-Lib native-library dependency.
+yfinance==1.5.1
+# polygon-api-client was pinned but unused (MarketFeed only has a yfinance
+# backend today — polygon_api_key in core/config.py is just a placeholder
+# setting for a future backend) — removed as dead weight during Fase 2's
+# fresh-install verification, where it turned out to also hard-conflict on
+# websockets<13.0 against yfinance's own websockets>=13.0 requirement.
 pandas-market-calendars==5.4.0  # exact NYSE/CME/NYMEX exchange calendars for market-hours checks
 
 # ML / RL
-torch==2.3.1
+torch==2.13.0
 stable-baselines3==2.3.2
 gymnasium==0.29.1
-scikit-learn==1.5.0
-xgboost==2.0.3
 
 # Brokers
 # MetaTrader5: official package only ships Windows wheels — there is no
@@ -32,41 +42,40 @@ xgboost==2.0.3
 #   1. Download the TWS API installer: https://interactivebrokers.github.io
 #   2. cd IBJts/source/pythonclient && python setup.py install
 # ibapi==10.19.2
-ccxt==4.3.77
 
 # MCP
 mcp==1.2.0
 
 # DB / cache
-asyncpg==0.29.0
-aiosqlite==0.20.0   # async SQLite driver — used for local dev (no Supabase)
-redis[asyncio]==5.0.5
-sqlalchemy[asyncio]==2.0.30
+asyncpg==0.31.0  # postgres driver — not active until Fase 3 (still on SQLite today). 0.29.0 has no cp311 wheel.
+aiosqlite==0.22.1   # async SQLite driver — used for local dev
+sqlalchemy[asyncio]==2.0.51
 alembic==1.13.1
-supabase==2.4.5
+# supabase was pinned but unused (SUPABASE_URL/KEY in core/config.py are
+# just placeholder settings, nothing imports the client) — removed during
+# Fase 2's fresh-install verification: supabase==2.4.5 hard-pins
+# httpx<0.28, conflicting with mcp's httpx>=0.27 + our own httpx==0.28.1.
+# redis[asyncio] was pinned but unused too (see ARCHITECTURE_REVIEW.md
+# Fase 5) — removed for the same "don't pin what nothing imports yet"
+# reasoning; re-add both when a feature actually starts using them.
 
 # News & events
 feedparser==6.0.11
-httpx==0.27.0
-beautifulsoup4==4.12.3
+httpx==0.28.1
+beautifulsoup4==4.15.0
 
 # Messaging
-python-telegram-bot==21.3
-websockets==12.0
+python-telegram-bot==21.3  # not wired up yet — TELEGRAM_BOT_TOKEN unused today
+websockets==16.1
 
 # Config & utils
-python-dotenv==1.0.1
-# mcp==1.2.0 requires pydantic>=2.10.1 and pydantic-settings>=2.6.1;
-# the original 2.7.1 / 2.3.0 pins conflicted with it.
-pydantic==2.10.6
-pydantic-settings==2.7.1
-loguru==0.7.2
-typer==0.12.3
-rich==13.7.1
+python-dotenv==1.2.2
+# mcp==1.2.0 requires pydantic>=2.10.1 and pydantic-settings>=2.6.1.
+pydantic==2.13.4
+pydantic-settings==2.14.2
+loguru==0.7.3
+rich==15.0.0
 
-# Dev tools
-pytest==8.2.2
-pytest-asyncio==0.23.7
-black==24.4.2
-ruff==0.4.9
-mypy==1.10.0
+# Dev tools (lint/type-check/test/pre-commit) now live in requirements-dev.txt,
+# not here — the production image (see Dockerfile) only installs this file,
+# so mypy/ruff/pytest/pre-commit never ship in the runtime container.

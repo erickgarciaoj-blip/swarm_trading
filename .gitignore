@@ -12,10 +12,18 @@ venv/
 *.log
 *.csv
 *.db
+*.db-journal
 *.sqlite3
 
 # RL model checkpoints (train via agents/rl/train.py)
 agents/rl/checkpoints/
+
+# Test/lint tool artifacts
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 
 # VS Code
 .vscode/settings.json

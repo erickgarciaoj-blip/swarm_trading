@@ -1,17 +1,28 @@
 """Unit tests for the RL observation-vector builder (no ML deps needed)."""
+
 from datetime import datetime
+
 import numpy as np
 import pytest
 
-from swarm_trading.agents.rl.features import build_observation, build_observation_from_row, N_FEATURES
+from swarm_trading.agents.rl.features import (
+    FEATURE_NAMES,
+    N_FEATURES,
+    build_observation,
+    build_observation_from_row,
+    validate_observation,
+)
 from swarm_trading.core.models import Candle, MarketState, Symbol
 
 
 def _state(rsi=60.0, atr=2.0, ema20=105.0, ema50=100.0, ema200=95.0, close=110.0):
-    candle = Candle(symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(),
-                     open=close, high=close, low=close, close=close, volume=1.0)
+    candle = Candle(
+        symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(), open=close, high=close, low=close, close=close, volume=1.0
+    )
     return MarketState(
-        symbol=Symbol.XAUUSD, timestamp=datetime.utcnow(), candles=[candle],
+        symbol=Symbol.XAUUSD,
+        timestamp=datetime.utcnow(),
+        candles=[candle],
         indicators={"rsi_14": rsi, "atr_14": atr, "ema_20": ema20, "ema_50": ema50, "ema_200": ema200},
     )
 
@@ -50,3 +61,45 @@ def test_build_observation_from_row_matches_build_observation():
     from_row = build_observation_from_row(row, equity_ratio=0.5)
     from_state = build_observation(_state(), equity_ratio=0.5)
     np.testing.assert_array_almost_equal(from_row, from_state)
+
+
+# ─── validate_observation() ─────────────────────────────────────────────────
+
+
+def test_validate_observation_accepts_a_finite_vector():
+    obs = build_observation(_state(), equity_ratio=0.5)
+    assert validate_observation(obs) is None
+
+
+def test_validate_observation_rejects_nan_and_names_the_feature():
+    obs = build_observation(_state(), equity_ratio=0.5)
+    obs[1] = np.float32("nan")  # index 1 == atr_pct
+    reason = validate_observation(obs)
+    assert reason is not None
+    assert "NaN" in reason
+    assert FEATURE_NAMES[1] in reason
+
+
+def test_validate_observation_rejects_infinite_and_names_the_feature():
+    obs = build_observation(_state(), equity_ratio=0.5)
+    obs[3] = np.float32("inf")  # index 3 == ema50_dev
+    reason = validate_observation(obs)
+    assert reason is not None
+    assert "infinite" in reason
+    assert FEATURE_NAMES[3] in reason
+
+
+def test_validate_observation_reports_all_offending_features_together():
+    obs = build_observation(_state(), equity_ratio=0.5)
+    obs[0] = np.float32("nan")
+    obs[2] = np.float32("nan")
+    reason = validate_observation(obs)
+    assert reason is not None
+    assert FEATURE_NAMES[0] in reason
+    assert FEATURE_NAMES[2] in reason
+
+
+def test_validate_observation_rejects_wrong_shape():
+    reason = validate_observation(np.array([1.0, 2.0], dtype=np.float32))
+    assert reason is not None
+    assert "shape" in reason

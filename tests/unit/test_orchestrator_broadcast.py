@@ -1,10 +1,20 @@
 """Unit tests for SwarmOrchestrator's WebSocket broadcaster wiring."""
-import pytest
+
+import asyncio
+import contextlib
 from datetime import datetime
+
+import pytest
 
 from swarm_trading.agents.base.base_agent import BaseAgent
 from swarm_trading.core.models import (
-    AgentType, ExecutedTrade, MarketState, OrderProposal, OrderStatus, Side, Symbol,
+    AgentType,
+    ExecutedTrade,
+    MarketState,
+    OrderProposal,
+    OrderStatus,
+    Side,
+    Symbol,
 )
 from swarm_trading.core.orchestrator.orchestrator import SwarmOrchestrator
 
@@ -17,8 +27,13 @@ class _FixedAgent(BaseAgent):
 
     async def analyze(self, market_state: MarketState) -> OrderProposal | None:
         return OrderProposal(
-            agent_id=self.agent_id, symbol=Symbol.XAUUSD, side=Side.LONG,
-            quantity=0.01, sl_price=1800.0, tp_price=1900.0, confidence=0.9,
+            agent_id=self.agent_id,
+            symbol=Symbol.XAUUSD,
+            side=Side.LONG,
+            quantity=0.01,
+            sl_price=1800.0,
+            tp_price=1900.0,
+            confidence=0.9,
         )
 
     async def on_trade_closed(self, trade: ExecutedTrade) -> None:
@@ -26,18 +41,30 @@ class _FixedAgent(BaseAgent):
 
 
 class _FakeBroker:
-    async def connect(self): return True
-    async def disconnect(self): pass
+    async def connect(self):
+        return True
+
+    async def disconnect(self):
+        pass
 
     async def execute(self, proposal: OrderProposal) -> ExecutedTrade:
         return ExecutedTrade(
-            trade_id="t1", agent_id=proposal.agent_id, symbol=proposal.symbol,
-            side=proposal.side, entry_price=1850.0, quantity=proposal.quantity,
-            sl_price=proposal.sl_price, tp_price=proposal.tp_price, status=OrderStatus.FILLED,
+            trade_id="t1",
+            agent_id=proposal.agent_id,
+            symbol=proposal.symbol,
+            side=proposal.side,
+            entry_price=1850.0,
+            quantity=proposal.quantity,
+            sl_price=proposal.sl_price,
+            tp_price=proposal.tp_price,
+            status=OrderStatus.FILLED,
         )
 
-    async def get_open_positions(self): return []
-    async def close_position(self, trade_id): raise NotImplementedError
+    async def get_open_positions(self):
+        return []
+
+    async def close_position(self, trade_id):
+        raise NotImplementedError
 
 
 def _orchestrator():
@@ -75,9 +102,17 @@ async def test_on_trade_closed_callback_broadcasts_trade_closed():
     orch.register_agent(agent)
 
     trade = ExecutedTrade(
-        trade_id="t1", agent_id=agent.agent_id, symbol=Symbol.XAUUSD, side=Side.LONG,
-        entry_price=1850.0, quantity=0.01, sl_price=1800.0, tp_price=1900.0,
-        status=OrderStatus.FILLED, pnl=1.25, closed_at=datetime.utcnow(),
+        trade_id="t1",
+        agent_id=agent.agent_id,
+        symbol=Symbol.XAUUSD,
+        side=Side.LONG,
+        entry_price=1850.0,
+        quantity=0.01,
+        sl_price=1800.0,
+        tp_price=1900.0,
+        status=OrderStatus.FILLED,
+        pnl=1.25,
+        closed_at=datetime.utcnow(),
     )
     await orch.on_trade_closed_callback(trade)
 
@@ -97,3 +132,45 @@ async def test_default_broadcaster_is_a_noop_when_unset():
 
 async def _async_noop():
     pass
+
+
+class _FlakyMarketFeed:
+    """Raises for a chosen set of symbols, like yfinance genuinely does when
+    a futures ticker (GC=F, CL=F) has no intraday bars available right now —
+    real, observed, unrelated-to-any-code-change behavior, not a mock of a
+    hypothetical failure."""
+
+    def __init__(self, broken_symbols):
+        self._broken = set(broken_symbols)
+        self.calls: list[Symbol] = []
+
+    async def get_state(self, symbol, period="1d", interval="1m"):
+        self.calls.append(symbol)
+        if symbol in self._broken:
+            raise ValueError(f"No data for {symbol.value}")
+        return MarketState(symbol=symbol, timestamp=datetime.utcnow(), candles=[], indicators={})
+
+
+class _NoopNewsFeed:
+    async def get_upcoming(self, symbol, horizon_hours=2):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_one_broken_symbol_does_not_block_the_others_in_the_same_tick():
+    """Regression test: before this fix, one symbol's get_state() exception
+    propagated out of the `for symbol in Symbol` loop into run()'s outer
+    except, which logged, slept, and restarted the tick from Symbol's first
+    member every time — so the swarm never got past the broken symbol to
+    process any of the other four, ever. Observed live against a real
+    yfinance outage on GC=F during Fase 2 verification."""
+    feed = _FlakyMarketFeed(broken_symbols={Symbol.XAUUSD})
+    orch = SwarmOrchestrator(broker=_FakeBroker(), market_feed=feed, news_feed=_NoopNewsFeed())
+
+    task = asyncio.ensure_future(orch.run())
+    await asyncio.sleep(0.05)  # let one tick's worth of symbol iteration happen
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert set(feed.calls) == set(Symbol)

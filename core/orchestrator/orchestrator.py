@@ -3,24 +3,29 @@ SwarmOrchestrator — the MCP-layer brain.
 Coordinates all 100 agents, data feeds, risk validation and broker execution.
 Designed to run as a single async loop; agents are coroutines, not threads.
 """
+
 from __future__ import annotations
+
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
 from loguru import logger
-from typing import Awaitable, Callable, TYPE_CHECKING
 
 from swarm_trading.core.config import settings
-from swarm_trading.core.models import AgentType, MarketState, Symbol, ExecutedTrade, OrderStatus
+from swarm_trading.core.models import AgentType, ExecutedTrade, MarketState, Side, Symbol
 from swarm_trading.risk.engine.risk_engine import RiskEngine
 
-Broadcaster = Callable[[dict], Awaitable[None]]
+JSONDict = dict[str, Any]
+Broadcaster = Callable[[JSONDict], Awaitable[None]]
 
 
-async def _noop_broadcaster(_message: dict) -> None:
+async def _noop_broadcaster(_message: JSONDict) -> None:
     pass
 
 
-def _trade_payload(trade: ExecutedTrade) -> dict:
+def _trade_payload(trade: ExecutedTrade) -> JSONDict:
     """JSON-safe view of an ExecutedTrade for the WebSocket feed."""
     return {
         "trade_id": trade.trade_id,
@@ -37,12 +42,13 @@ def _trade_payload(trade: ExecutedTrade) -> dict:
         "closed_at": trade.closed_at.isoformat() if trade.closed_at else None,
     }
 
+
 if TYPE_CHECKING:
     from swarm_trading.agents.base.base_agent import BaseAgent
     from swarm_trading.brokers.adapters.broker_interface import BrokerInterface
     from swarm_trading.data.feeds.market_feed import MarketFeed
-    from swarm_trading.data.news.news_feed import NewsFeed
     from swarm_trading.data.historic.repository import AsyncRepository
+    from swarm_trading.data.news.news_feed import NewsFeed
 
 
 class SwarmOrchestrator:
@@ -56,12 +62,12 @@ class SwarmOrchestrator:
 
     def __init__(
         self,
-        broker: "BrokerInterface",
-        market_feed: "MarketFeed",
-        news_feed: "NewsFeed",
-        repository: "AsyncRepository | None" = None,
+        broker: BrokerInterface,
+        market_feed: MarketFeed,
+        news_feed: NewsFeed,
+        repository: AsyncRepository | None = None,
     ):
-        self._agents: dict[str, "BaseAgent"] = {}
+        self._agents: dict[str, BaseAgent] = {}
         self._broker = broker
         self._market_feed = market_feed
         self._news_feed = news_feed
@@ -71,7 +77,13 @@ class SwarmOrchestrator:
         self._broadcast: Broadcaster = _noop_broadcaster
         # Fire-and-forget DB writes (save_trade) must be kept referenced
         # until they finish, or asyncio may garbage-collect them mid-flight.
-        self._background_tasks: set[asyncio.Task] = set()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        self._started_at: datetime | None = None
+        self._last_price: dict[Symbol, float] = {}
+        # Unrealized (mark-to-market) PnL per agent, recomputed once per tick from
+        # the broker's open positions — agent.equity only moves on trade close,
+        # so this is what lets the dashboard's equity curve move between closes.
+        self._floating_pnl: dict[str, float] = {}
 
     def _fire_and_forget(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -85,7 +97,7 @@ class SwarmOrchestrator:
 
     # ─── Agent management ────────────────────────────────────────────────────
 
-    def register_agent(self, agent: "BaseAgent") -> None:
+    def register_agent(self, agent: BaseAgent) -> None:
         self._agents[agent.agent_id] = agent
         logger.info(f"[Swarm] Registered {agent}")
 
@@ -93,7 +105,7 @@ class SwarmOrchestrator:
         self._agents.pop(agent_id, None)
 
     @property
-    def active_agents(self) -> list["BaseAgent"]:
+    def active_agents(self) -> list[BaseAgent]:
         return [a for a in self._agents.values() if a.is_alive]
 
     # ─── Main loop ────────────────────────────────────────────────────────────
@@ -101,31 +113,27 @@ class SwarmOrchestrator:
     async def run(self) -> None:
         """Main event loop. Fetches market state every tick and dispatches to agents."""
         self._running = True
+        self._started_at = datetime.utcnow()
         logger.info(f"[Swarm] Starting with {len(self._agents)} agents")
 
         while self._running:
             try:
                 for symbol in Symbol:
-                    state: MarketState = await self._market_feed.get_state(symbol)
-                    news_events        = await self._news_feed.get_upcoming(symbol)
-                    state.upcoming_news = news_events
+                    # Isolated per symbol: a data-source outage on one symbol
+                    # (e.g. yfinance having no intraday bars for a futures
+                    # ticker right now) must not block every other symbol's
+                    # tick — before this, one bad symbol raised past this
+                    # loop into the outer except below, which restarted the
+                    # whole tick from Symbol's first member every time,
+                    # so the swarm never progressed past the broken symbol.
+                    try:
+                        await self._process_symbol(symbol)
+                    except Exception as exc:
+                        logger.warning(f"[Swarm] Skipping {symbol.value} this tick: {exc}")
 
-                    # Resolve TP/SL against this tick's price before dispatching new
-                    # signals — frees up SYMBOL_CONCENTRATION slots for brokers (e.g.
-                    # offline mode) that don't manage TP/SL server-side themselves.
-                    if state.candles:
-                        closed_trades = await self._broker.check_tp_sl(symbol, state.candles[-1].close)
-                        for trade in closed_trades:
-                            await self.on_trade_closed_callback(trade)
-
-                    # Dispatch all active agents for this symbol concurrently
-                    symbol_agents = [a for a in self.active_agents if a.symbol == symbol]
-                    await asyncio.gather(*[
-                        self._process_agent(agent, state) for agent in symbol_agents
-                    ], return_exceptions=True)
-
+                self._floating_pnl = await self._compute_floating_pnl()
                 await self._broadcast({"type": "swarm_summary", "data": self.get_swarm_summary()})
-                await asyncio.sleep(60)  # tick every 60s — adjust per strategy
+                await asyncio.sleep(15)  # tick every 15s — adjust per strategy
 
             except asyncio.CancelledError:
                 break
@@ -135,16 +143,33 @@ class SwarmOrchestrator:
 
         logger.info("[Swarm] Stopped")
 
-    async def _process_agent(self, agent: "BaseAgent", state: MarketState) -> None:
+    async def _process_symbol(self, symbol: Symbol) -> None:
+        state: MarketState = await self._market_feed.get_state(symbol)
+        news_events = await self._news_feed.get_upcoming(symbol)
+        state.upcoming_news = news_events
+
+        if state.candles:
+            self._last_price[symbol] = state.candles[-1].close
+
+            # Resolve TP/SL against this tick's price before dispatching new
+            # signals — frees up SYMBOL_CONCENTRATION slots for brokers (e.g.
+            # offline mode) that don't manage TP/SL server-side themselves.
+            closed_trades = await self._broker.check_tp_sl(symbol, state.candles[-1].close)
+            for trade in closed_trades:
+                await self.on_trade_closed_callback(trade)
+
+        # Dispatch all active agents for this symbol concurrently
+        symbol_agents = [a for a in self.active_agents if a.symbol == symbol]
+        await asyncio.gather(*[self._process_agent(agent, state) for agent in symbol_agents], return_exceptions=True)
+
+    async def _process_agent(self, agent: BaseAgent, state: MarketState) -> None:
         try:
             proposal = await agent.analyze(state)
             if proposal is None:
                 return
 
             metrics = agent.get_metrics()
-            approved, reason = self._risk.validate(
-                proposal, metrics, is_news_blackout=state.is_news_blackout
-            )
+            approved, reason = self._risk.validate(proposal, metrics, is_news_blackout=state.is_news_blackout)
 
             if not approved:
                 logger.debug(f"[{agent.agent_id}] REJECTED: {reason}")
@@ -178,10 +203,37 @@ class SwarmOrchestrator:
         self._running = False
         logger.info("[Swarm] Stop signal sent")
 
+    # ─── Floating (mark-to-market) PnL ─────────────────────────────────────────
+
+    async def _compute_floating_pnl(self) -> dict[str, float]:
+        """Unrealized PnL per agent from currently open positions, using each
+        symbol's last known tick price. Same pct-of-notional formula as the
+        offline broker's realized TP/SL close (see IBKRBroker.check_tp_sl) so
+        floating and realized PnL stay on a consistent scale."""
+        floating: dict[str, float] = {}
+        try:
+            open_positions = await self._broker.get_open_positions()
+        except Exception as exc:
+            logger.warning(f"[Swarm] get_open_positions failed: {exc}")
+            return floating
+
+        for trade in open_positions:
+            price = self._last_price.get(trade.symbol)
+            if price is None or not trade.entry_price:
+                continue
+            direction = 1 if trade.side == Side.LONG else -1
+            pct_change = (price - trade.entry_price) / trade.entry_price
+            floating[trade.agent_id] = floating.get(trade.agent_id, 0.0) + trade.quantity * pct_change * direction
+        return floating
+
+    def floating_pnl_for(self, agent_id: str) -> float:
+        return round(self._floating_pnl.get(agent_id, 0.0), 4)
+
     # ─── Control panel methods ────────────────────────────────────────────────
 
     def pause_group(self, agent_type: AgentType) -> int:
         from swarm_trading.core.models import AgentStatus
+
         count = 0
         for a in self._agents.values():
             if a.agent_type == agent_type:
@@ -190,16 +242,23 @@ class SwarmOrchestrator:
         logger.warning(f"[Swarm] Paused {count} agents of type {agent_type.value}")
         return count
 
-    def get_swarm_summary(self) -> dict:
+    def get_swarm_summary(self) -> JSONDict:
         metrics = [a.get_metrics() for a in self._agents.values()]
-        total_equity   = sum(m.equity for m in metrics)
-        total_trades   = sum(m.total_trades for m in metrics)
-        active_count   = sum(1 for m in metrics if m.current_status.value == "ACTIVE")
-        retired_count  = sum(1 for m in metrics if m.current_status.value == "RETIRED")
-        avg_win_rate   = sum(m.win_rate for m in metrics) / len(metrics) if metrics else 0
+        realized_equity = sum(m.equity for m in metrics)
+        floating_pnl = round(sum(self._floating_pnl.values()), 4)
+        total_equity = round(realized_equity + floating_pnl, 4)
+        total_trades = sum(m.total_trades for m in metrics)
+        active_count = sum(1 for m in metrics if m.current_status.value == "ACTIVE")
+        retired_count = sum(1 for m in metrics if m.current_status.value == "RETIRED")
+        avg_win_rate = sum(m.win_rate for m in metrics) / len(metrics) if metrics else 0
+        uptime_seconds = (datetime.utcnow() - self._started_at).total_seconds() if self._started_at else 0
         return {
             "timestamp": datetime.utcnow().isoformat(),
-            "total_equity": round(total_equity, 4),
+            "started_at": self._started_at.isoformat() if self._started_at else None,
+            "uptime_seconds": round(uptime_seconds),
+            "total_equity": total_equity,
+            "realized_equity": round(realized_equity, 4),
+            "floating_pnl": floating_pnl,
             "initial_capital": settings.swarm_total_capital_usd,
             "pnl": round(total_equity - settings.swarm_total_capital_usd, 4),
             "total_trades": total_trades,

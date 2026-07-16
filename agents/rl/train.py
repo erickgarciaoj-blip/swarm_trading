@@ -8,9 +8,12 @@ Usage:
     python -m swarm_trading.agents.rl.train --symbol XAUUSD  # just one
     python -m swarm_trading.agents.rl.train --timesteps 50000
 """
+
 from __future__ import annotations
+
 import argparse
 from pathlib import Path
+
 from loguru import logger
 
 from swarm_trading.core.config import settings
@@ -19,8 +22,9 @@ from swarm_trading.core.models import Symbol
 
 def train_symbol(symbol: Symbol, timesteps: int) -> Path:
     from stable_baselines3 import PPO
-    from swarm_trading.agents.rl.env import SwarmTradingEnv
+
     from swarm_trading.agents.rl.data import fetch_feature_frame
+    from swarm_trading.agents.rl.env import SwarmTradingEnv
 
     logger.info(f"[RL train] Fetching history for {symbol.value}...")
     df = fetch_feature_frame(symbol, period="730d", interval="1h")

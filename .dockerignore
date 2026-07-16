@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.log
+*.db
+*.db-journal
+*.sqlite3
+agents/rl/checkpoints/
+.git/
+.vscode/
+.pytest_cache/

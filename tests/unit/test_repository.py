@@ -1,6 +1,8 @@
 """Unit tests for AsyncRepository (SQLAlchemy 2.0 async persistence layer)."""
-import pytest
+
 from datetime import datetime
+
+import pytest
 
 from swarm_trading.core.models import ExecutedTrade, OrderStatus, Side, Symbol
 from swarm_trading.data.historic.repository import AsyncRepository
@@ -16,9 +18,17 @@ MEMORY_DB_URL = "sqlite+aiosqlite:///:memory:"
 
 def _trade(trade_id="t1", agent_id="agent_1", pnl=1.5) -> ExecutedTrade:
     return ExecutedTrade(
-        trade_id=trade_id, agent_id=agent_id, symbol=Symbol.XAUUSD, side=Side.LONG,
-        entry_price=1900.0, quantity=0.01, sl_price=1850.0, tp_price=1950.0,
-        status=OrderStatus.FILLED, pnl=pnl, closed_at=datetime.utcnow(),
+        trade_id=trade_id,
+        agent_id=agent_id,
+        symbol=Symbol.XAUUSD,
+        side=Side.LONG,
+        entry_price=1900.0,
+        quantity=0.01,
+        sl_price=1850.0,
+        tp_price=1950.0,
+        status=OrderStatus.FILLED,
+        pnl=pnl,
+        closed_at=datetime.utcnow(),
     )
 
 

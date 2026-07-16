@@ -4,6 +4,9 @@ routes, using FastAPI's TestClient against a fake orchestrator/repository
 (no real SwarmOrchestrator/DB needed — routes.py only ever touches
 `_orchestrator._agents` and `_repository.get_agent_trades`).
 """
+
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,14 +16,17 @@ from swarm_trading.dashboard.api.routes import app, set_orchestrator, set_reposi
 
 
 class _FakeOrchestrator:
-    def __init__(self, agents: dict):
+    def __init__(self, agents: dict[str, Any]):
         self._agents = agents
+
+    def floating_pnl_for(self, agent_id: str) -> float:
+        return 0.0
 
 
 class _FakeRepository:
-    def __init__(self, trades_by_agent: dict):
+    def __init__(self, trades_by_agent: dict[str, Any]):
         self._trades_by_agent = trades_by_agent
-        self.last_limit = "unset"
+        self.last_limit: int | str | None = "unset"
 
     async def get_agent_trades(self, agent_id, limit=None):
         self.last_limit = limit
@@ -49,6 +55,7 @@ def _agent():
 
 # ─── /agents/{id}/metrics ──────────────────────────────────────────────────
 
+
 def test_agent_metrics_returns_metrics_for_known_agent(client):
     agent = _agent()
     set_orchestrator(_FakeOrchestrator({agent.agent_id: agent}))
@@ -59,9 +66,19 @@ def test_agent_metrics_returns_metrics_for_known_agent(client):
     body = res.json()
     assert body["agent_id"] == agent.agent_id
     assert body["equity"] == 5.0
+    assert body["realized_equity"] == 5.0
+    assert body["floating_pnl"] == 0.0
     assert body["status"] == "ACTIVE"
     assert set(body) == {
-        "agent_id", "equity", "win_rate", "sharpe", "max_drawdown", "total_trades", "status",
+        "agent_id",
+        "equity",
+        "realized_equity",
+        "floating_pnl",
+        "win_rate",
+        "sharpe",
+        "max_drawdown",
+        "total_trades",
+        "status",
     }
 
 
@@ -80,6 +97,7 @@ def test_agent_metrics_without_orchestrator_returns_empty_dict(client):
 
 
 # ─── /agents/{id}/trades ────────────────────────────────────────────────────
+
 
 def test_agent_trades_defaults_to_last_10(client):
     trades = [{"trade_id": f"t{i}", "pnl": i} for i in range(15)]

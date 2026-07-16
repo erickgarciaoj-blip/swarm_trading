@@ -6,8 +6,12 @@ to track connected clients and fan a JSON dict out to all of them. Anything
 that decides *what* to send (periodic snapshots, event pushes) lives in
 dashboard/api/routes.py or is injected via SwarmOrchestrator.set_broadcaster.
 """
+
 from __future__ import annotations
+
 import asyncio
+from typing import Any
+
 from fastapi import WebSocket
 from loguru import logger
 
@@ -30,7 +34,7 @@ class WebSocketManager:
             self._connections.discard(websocket)
         logger.info(f"[WS] Client disconnected ({len(self._connections)} total)")
 
-    async def broadcast(self, data: dict) -> None:
+    async def broadcast(self, data: dict[str, Any]) -> None:
         async with self._lock:
             connections = list(self._connections)
         if not connections:

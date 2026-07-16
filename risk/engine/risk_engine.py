@@ -3,14 +3,20 @@ RiskEngine — the single gate every OrderProposal must pass through.
 No order reaches the broker without this validation.
 FTMO-style rules + swarm-level correlation limits.
 """
+
 from __future__ import annotations
+
 from collections import defaultdict, deque
 from datetime import datetime
+
 from loguru import logger
 
 from swarm_trading.core.config import settings
 from swarm_trading.core.models import (
-    AgentMetrics, ExecutedTrade, OrderProposal, Symbol,
+    AgentMetrics,
+    ExecutedTrade,
+    OrderProposal,
+    Symbol,
 )
 
 RECENT_TRADES_MAXLEN = 10
@@ -76,8 +82,8 @@ class RiskEngine:
         logger.debug(f"[RiskEngine] +1 open on {proposal.symbol.value} by {proposal.agent_id}")
 
     def on_trade_closed(self, trade: ExecutedTrade) -> None:
-        self._daily_pnl  += trade.pnl
-        self._total_pnl  += trade.pnl
+        self._daily_pnl += trade.pnl
+        self._total_pnl += trade.pnl
         symbol = trade.symbol
         if self._open_positions_by_symbol[symbol] > 0:
             self._open_positions_by_symbol[symbol] -= 1

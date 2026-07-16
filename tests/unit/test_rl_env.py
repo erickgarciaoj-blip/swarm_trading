@@ -1,5 +1,5 @@
 """Unit tests for SwarmTradingEnv (requires gymnasium + pandas)."""
-import numpy as np
+
 import pandas as pd
 import pytest
 
@@ -7,14 +7,16 @@ from swarm_trading.agents.rl.env import ACTION_FLAT, ACTION_LONG, ACTION_SHORT, 
 
 
 def _df(closes):
-    return pd.DataFrame({
-        "close": closes,
-        "rsi_14": [50.0] * len(closes),
-        "atr_14": [1.0] * len(closes),
-        "ema_20": closes,
-        "ema_50": closes,
-        "ema_200": closes,
-    })
+    return pd.DataFrame(
+        {
+            "close": closes,
+            "rsi_14": [50.0] * len(closes),
+            "atr_14": [1.0] * len(closes),
+            "ema_20": closes,
+            "ema_50": closes,
+            "ema_200": closes,
+        }
+    )
 
 
 def test_reset_returns_observation_of_correct_shape():
@@ -27,7 +29,7 @@ def test_reset_returns_observation_of_correct_shape():
 def test_long_action_on_rising_price_gives_positive_reward():
     env = SwarmTradingEnv(_df([100.0, 110.0]))
     env.reset()
-    obs, reward, terminated, truncated, info = env.step(ACTION_LONG)
+    _obs, reward, terminated, _truncated, _info = env.step(ACTION_LONG)
     assert reward == pytest.approx(0.10)
     assert not terminated
 

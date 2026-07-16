@@ -13,18 +13,22 @@ concept of "agent". So get_open_positions()/close_position() are backed by an
 in-memory registry this adapter keeps of trades it itself opened (keyed by
 our own trade_id), not by querying IBKR's netted position feed.
 """
+
 from __future__ import annotations
+
 import asyncio
 import threading
 import uuid
 from datetime import datetime
+
 from loguru import logger
 
 try:
     from ibapi.client import EClient
-    from ibapi.wrapper import EWrapper
     from ibapi.contract import Contract
     from ibapi.order import Order as IBOrder
+    from ibapi.wrapper import EWrapper
+
     IBKR_AVAILABLE = True
 except ImportError:
     # ibapi isn't on PyPI — see requirements.txt for manual install steps.
@@ -36,6 +40,7 @@ from swarm_trading.brokers.adapters.broker_interface import BrokerInterface
 from swarm_trading.core.config import settings
 from swarm_trading.core.models import ExecutedTrade, OrderProposal, OrderStatus, Side
 
+
 def get_front_month() -> str:
     """Retorna el mes de vencimiento más próximo en formato YYYYMM."""
     now = datetime.utcnow()
@@ -43,10 +48,10 @@ def get_front_month() -> str:
     # Si estamos en la segunda mitad del mes, usar el siguiente
     if now.day >= 15:
         month = now.month + 1 if now.month < 12 else 1
-        year  = now.year if now.month < 12 else now.year + 1
+        year = now.year if now.month < 12 else now.year + 1
     else:
         month = now.month
-        year  = now.year
+        year = now.year
     return f"{year}{month:02d}"
 
 
@@ -57,36 +62,36 @@ def get_contract(symbol: str) -> Contract:
     c = Contract()
 
     if symbol == "XAUUSD":
-        c.symbol   = "XAUUSD"
-        c.secType  = "CMDTY"
+        c.symbol = "XAUUSD"
+        c.secType = "CMDTY"
         c.exchange = "IBCMDTY"
         c.currency = "USD"
 
     elif symbol == "PLTR":
-        c.symbol   = "PLTR"
-        c.secType  = "STK"
+        c.symbol = "PLTR"
+        c.secType = "STK"
         c.exchange = "SMART"
         c.currency = "USD"
 
     elif symbol in ("NAS100", "US100"):
-        c.symbol        = "NQ"
-        c.secType       = "FUT"
-        c.exchange      = "CME"
-        c.currency      = "USD"
+        c.symbol = "NQ"
+        c.secType = "FUT"
+        c.exchange = "CME"
+        c.currency = "USD"
         c.includeExpired = False
         c.lastTradeDateOrContractMonth = get_front_month()
 
     elif symbol == "OIL":
-        c.symbol        = "CL"
-        c.secType       = "FUT"
-        c.exchange      = "NYMEX"
-        c.currency      = "USD"
+        c.symbol = "CL"
+        c.secType = "FUT"
+        c.exchange = "NYMEX"
+        c.currency = "USD"
         c.includeExpired = False
         c.lastTradeDateOrContractMonth = get_front_month()
 
     else:
-        c.symbol   = symbol
-        c.secType  = "STK"
+        c.symbol = symbol
+        c.secType = "STK"
         c.exchange = "SMART"
         c.currency = "USD"
 
@@ -95,8 +100,8 @@ def get_contract(symbol: str) -> Contract:
 
 # Futures point values, used to convert OrderProposal.quantity (USD-notional)
 # into a whole number of contracts.
-NQ_POINT_VALUE = 20.0      # 1 point NQ = $20 USD
-CL_POINT_VALUE = 1_000.0   # 1 point CL = $1,000 USD
+NQ_POINT_VALUE = 20.0  # 1 point NQ = $20 USD
+CL_POINT_VALUE = 1_000.0  # 1 point CL = $1,000 USD
 
 
 def resolve_order_quantity(symbol: str, notional_usd: float, price: float) -> int:
@@ -129,10 +134,15 @@ ORDER_FILL_TIMEOUT_SEC = 30
 
 
 if IBKR_AVAILABLE:
-    class _IBClient(EWrapper, EClient):
+    # ibapi isn't on PyPI (see the import try/except above) — mypy has no
+    # stubs for it even with ignore_missing_imports, so EWrapper/EClient
+    # type as Any and subclassing them can't be verified statically. No
+    # feasible fix short of hand-maintaining stubs for a package that isn't
+    # installed on this platform.
+    class _IBClient(EWrapper, EClient):  # type: ignore[misc]
         """Glues raw ibapi callbacks (network thread) to IBKRBroker's state."""
 
-        def __init__(self, broker: "IBKRBroker"):
+        def __init__(self, broker: IBKRBroker):
             EClient.__init__(self, self)
             self._broker = broker
 
@@ -148,11 +158,23 @@ if IBKR_AVAILABLE:
             else:
                 logger.warning(f"[IBKR] error reqId={reqId} code={errorCode}: {errorString}")
 
-        def orderStatus(self, orderId, status, filled, remaining, avgFillPrice,
-                         permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice) -> None:
+        def orderStatus(
+            self,
+            orderId,
+            status,
+            filled,
+            remaining,
+            avgFillPrice,
+            permId,
+            parentId,
+            lastFillPrice,
+            clientId,
+            whyHeld,
+            mktCapPrice,
+        ) -> None:
             self._broker._on_order_status(orderId, status, avgFillPrice)
 else:
-    _IBClient = None
+    _IBClient = None  # type: ignore[assignment,misc]
 
 
 class IBKRBroker(BrokerInterface):
@@ -191,19 +213,28 @@ class IBKRBroker(BrokerInterface):
             )
             return False
 
+        # __init__ only leaves _client None when offline or ibapi is
+        # unavailable — both already handled by the two guards above.
+        assert self._client is not None
+
         self._loop = asyncio.get_running_loop()
         try:
-            self._client.connect(settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)
+            # ibapi's EClient.connect() is a blocking socket connect — off the
+            # event loop, same reasoning as the run_in_executor call below
+            # (see docs/architecture/adr/0002-async-io-blocking-calls-must-use-executor.md).
+            await self._loop.run_in_executor(
+                None, self._client.connect, settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id
+            )
             threading.Thread(target=self._client.run, daemon=True, name="ibkr-client").start()
 
-            connected = await self._loop.run_in_executor(
-                None, self._connected_event.wait, CONNECT_TIMEOUT_SEC
-            )
+            connected = await self._loop.run_in_executor(None, self._connected_event.wait, CONNECT_TIMEOUT_SEC)
             if not connected:
                 logger.error("[IBKR] Timed out waiting for nextValidId — is TWS/Gateway running?")
                 return False
 
-            logger.info(f"[IBKR] Connected to {settings.ibkr_host}:{settings.ibkr_port} (clientId={settings.ibkr_client_id})")
+            logger.info(
+                f"[IBKR] Connected to {settings.ibkr_host}:{settings.ibkr_port} (clientId={settings.ibkr_client_id})"
+            )
             return True
         except Exception as e:
             logger.error(f"[IBKR] Connection error: {e}")
@@ -247,7 +278,9 @@ class IBKRBroker(BrokerInterface):
             # deliberately unimplemented in offline mode per that method's
             # own contract.
             self._open_trades[trade.trade_id] = trade
-            logger.info(f"[IBKR] OFFLINE simulated: {trade.side.value} {trade.symbol.value} | agent={proposal.agent_id}")
+            logger.info(
+                f"[IBKR] OFFLINE simulated: {trade.side.value} {trade.symbol.value} | agent={proposal.agent_id}"
+            )
             return trade
 
         contract = get_contract(proposal.symbol.value)
@@ -282,6 +315,10 @@ class IBKRBroker(BrokerInterface):
         fill_event = asyncio.Event()
         self._order_events[parent_id] = fill_event
 
+        # Reaching here past the offline early-return means we're in live
+        # mode; _next_id() above would already have raised RuntimeError if
+        # connect() (the only place that populates _client) never succeeded.
+        assert self._client is not None
         self._client.placeOrder(parent.orderId, contract, parent)
         self._client.placeOrder(take_profit.orderId, contract, take_profit)
         self._client.placeOrder(stop_loss.orderId, contract, stop_loss)
@@ -290,7 +327,7 @@ class IBKRBroker(BrokerInterface):
             await asyncio.wait_for(fill_event.wait(), timeout=ORDER_FILL_TIMEOUT_SEC)
             status = OrderStatus.FILLED
             entry_price = self._order_fill_price.pop(parent_id, 0.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"[IBKR] Fill timeout for order {parent_id} (agent={proposal.agent_id})")
             status = OrderStatus.REJECTED
             entry_price = 0.0
@@ -315,7 +352,10 @@ class IBKRBroker(BrokerInterface):
             self._open_trades[trade_id] = trade
             self._child_order_ids[trade_id] = (tp_id, sl_id)
 
-        logger.info(f"[IBKR] Order {status.value}: {trade.side.value} {trade.symbol.value} @ {entry_price} | agent={proposal.agent_id}")
+        logger.info(
+            f"[IBKR] Order {status.value}: {trade.side.value} {trade.symbol.value} "
+            f"@ {entry_price} | agent={proposal.agent_id}"
+        )
         return trade
 
     def _on_order_status(self, order_id: int, status: str, avg_fill_price: float) -> None:
@@ -346,13 +386,11 @@ class IBKRBroker(BrokerInterface):
             if trade.symbol != symbol:
                 continue
 
-            hit_tp = (
-                (trade.side == Side.LONG and current_price >= trade.tp_price)
-                or (trade.side == Side.SHORT and current_price <= trade.tp_price)
+            hit_tp = (trade.side == Side.LONG and current_price >= trade.tp_price) or (
+                trade.side == Side.SHORT and current_price <= trade.tp_price
             )
-            hit_sl = (
-                (trade.side == Side.LONG and current_price <= trade.sl_price)
-                or (trade.side == Side.SHORT and current_price >= trade.sl_price)
+            hit_sl = (trade.side == Side.LONG and current_price <= trade.sl_price) or (
+                trade.side == Side.SHORT and current_price >= trade.sl_price
             )
             if not (hit_tp or hit_sl):
                 continue
@@ -400,6 +438,10 @@ class IBKRBroker(BrokerInterface):
         if trade is None:
             raise ValueError(f"[IBKR] No open trade tracked with id={trade_id}")
 
+        # Same invariant as execute(): live mode + an open tracked trade means
+        # connect() already succeeded and populated _client.
+        assert self._client is not None
+
         # Cancel the still-resting TP/SL child orders before flattening,
         # otherwise one could fill later against a position that no longer exists.
         for child_id in self._child_order_ids.get(trade_id, ()):
@@ -421,7 +463,7 @@ class IBKRBroker(BrokerInterface):
         try:
             await asyncio.wait_for(fill_event.wait(), timeout=ORDER_FILL_TIMEOUT_SEC)
             exit_price = self._order_fill_price.pop(close_id, trade.entry_price)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"[IBKR] Close fill timeout for trade {trade_id}")
             exit_price = trade.entry_price
         finally:

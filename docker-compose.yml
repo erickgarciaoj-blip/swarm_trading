@@ -1,0 +1,21 @@
+services:
+  swarm:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # SQLite lives on the named volume below, not inside the container
+      # filesystem, so trade history survives image rebuilds/redeploys.
+      DATABASE_URL: sqlite+aiosqlite:////data/swarm_trading.db
+    ports:
+      # Bound to localhost only — the dashboard has no auth, and /swarm/halt
+      # is an unauthenticated POST. Reach it via an SSH tunnel:
+      #   ssh -L 8000:localhost:8000 <user>@<vps-ip>
+      # then open http://localhost:8000/frontend/ on your own machine.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - swarm_data:/data
+
+volumes:
+  swarm_data:

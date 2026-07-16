@@ -1,6 +1,9 @@
 """Abstract broker interface. All concrete brokers implement this."""
+
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
+
 from swarm_trading.core.models import ExecutedTrade, OrderProposal, Symbol
 
 

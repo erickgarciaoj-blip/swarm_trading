@@ -1,7 +1,7 @@
 """Unit tests for BaseAgent."""
-import pytest
+
 from swarm_trading.agents.scalper.scalper_agent import ScalperAgent
-from swarm_trading.core.models import Symbol, AgentStatus
+from swarm_trading.core.models import AgentStatus, Symbol
 
 
 def test_agent_initializes_correctly():

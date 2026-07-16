@@ -7,9 +7,11 @@ heuristic. XAUUSD is modeled as spot/CFD gold, which doesn't trade on a
 single exchange calendar, so it keeps the standard global FX week
 (Sun 22:00 UTC -> Fri 22:00 UTC) instead.
 """
+
 from __future__ import annotations
-from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+
+from datetime import UTC, datetime, timedelta
+from functools import cache
 
 import pandas_market_calendars as mcal
 
@@ -21,14 +23,14 @@ from swarm_trading.core.models import Symbol
 # None means "not exchange-listed" — handled by the FX heuristic below.
 SYMBOL_CALENDAR: dict[Symbol, str | None] = {
     Symbol.XAUUSD: None,
-    Symbol.PLTR:   "NYSE",
+    Symbol.PLTR: "NYSE",
     Symbol.NAS100: "CME_Equity",
-    Symbol.US100:  "CME_Equity",
-    Symbol.OIL:    "CMEGlobex_CL",
+    Symbol.US100: "CME_Equity",
+    Symbol.OIL: "CMEGlobex_CL",
 }
 
 
-@lru_cache(maxsize=None)
+@cache
 def _get_calendar(name: str):
     return mcal.get_calendar(name)
 
@@ -40,14 +42,12 @@ def _is_fx_open(now_utc: datetime) -> bool:
         return False
     if weekday == 4 and hour >= 22:  # Friday after 22:00 UTC
         return False
-    if weekday == 6 and hour < 22:  # Sunday before 22:00 UTC
-        return False
-    return True
+    return not (weekday == 6 and hour < 22)  # Sunday before 22:00 UTC
 
 
 def is_market_open(symbol: Symbol, now: datetime | None = None) -> bool:
     """True if `symbol`'s market is open at `now` (defaults to current UTC time)."""
-    now_utc = (now or datetime.utcnow()).replace(tzinfo=timezone.utc)
+    now_utc = (now or datetime.utcnow()).replace(tzinfo=UTC)
     calendar_name = SYMBOL_CALENDAR.get(symbol)
 
     if calendar_name is None:
@@ -64,10 +64,7 @@ def is_market_open(symbol: Symbol, now: datetime | None = None) -> bool:
     if schedule.empty:
         return False
 
-    return any(
-        row["market_open"] <= now_utc <= row["market_close"]
-        for _, row in schedule.iterrows()
-    )
+    return any(row["market_open"] <= now_utc <= row["market_close"] for _, row in schedule.iterrows())
 
 
 def market_status_by_symbol(now: datetime | None = None) -> dict[str, bool]:

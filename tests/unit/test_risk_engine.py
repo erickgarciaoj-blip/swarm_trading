@@ -1,12 +1,18 @@
 """Unit tests for RiskEngine."""
+
 import pytest
-from swarm_trading.risk.engine.risk_engine import RiskEngine
+
 from swarm_trading.core.config import settings
 from swarm_trading.core.models import (
-    AgentMetrics, AgentStatus, AgentType, ExecutedTrade, OrderProposal,
-    OrderStatus, Side, Symbol,
+    AgentMetrics,
+    AgentStatus,
+    ExecutedTrade,
+    OrderProposal,
+    OrderStatus,
+    Side,
+    Symbol,
 )
-from datetime import datetime
+from swarm_trading.risk.engine.risk_engine import RiskEngine
 
 
 def make_proposal():
@@ -19,6 +25,7 @@ def make_proposal():
         tp_price=1900.0,
         confidence=0.8,
     )
+
 
 def make_metrics(equity=1.0, initial=1.0, status=AgentStatus.ACTIVE):
     return AgentMetrics(
@@ -68,11 +75,20 @@ def test_symbol_concentration_limit():
 
 
 def _close_with_pnl(engine: RiskEngine, pnl: float) -> None:
-    engine.on_trade_closed(ExecutedTrade(
-        trade_id="t", agent_id="test_agent_001", symbol=Symbol.XAUUSD, side=Side.LONG,
-        entry_price=1.0, quantity=1.0, sl_price=1.0, tp_price=1.0,
-        status=OrderStatus.FILLED, pnl=pnl,
-    ))
+    engine.on_trade_closed(
+        ExecutedTrade(
+            trade_id="t",
+            agent_id="test_agent_001",
+            symbol=Symbol.XAUUSD,
+            side=Side.LONG,
+            entry_price=1.0,
+            quantity=1.0,
+            sl_price=1.0,
+            tp_price=1.0,
+            status=OrderStatus.FILLED,
+            pnl=pnl,
+        )
+    )
 
 
 def test_large_daily_loss_does_not_halt_the_swarm():
@@ -82,7 +98,7 @@ def test_large_daily_loss_does_not_halt_the_swarm():
     # Bigger than the old 5% daily threshold, but well under the 50% total limit.
     _close_with_pnl(engine, -0.06 * settings.swarm_total_capital_usd)
 
-    ok, reason = engine.validate(make_proposal(), make_metrics())
+    ok, _reason = engine.validate(make_proposal(), make_metrics())
 
     assert ok is True
     assert engine.is_halted is False

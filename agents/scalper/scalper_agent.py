@@ -3,11 +3,19 @@ Scalper Agent — operates on 1m/5m candles.
 Logic: RSI extremes + ATR-based SL/TP.
 Each instance has different RSI thresholds to ensure policy diversity.
 """
+
 from __future__ import annotations
+
 import random
+
 from swarm_trading.agents.base.base_agent import BaseAgent
 from swarm_trading.core.models import (
-    AgentType, ExecutedTrade, MarketState, OrderProposal, Side, Symbol,
+    AgentType,
+    ExecutedTrade,
+    MarketState,
+    OrderProposal,
+    Side,
+    Symbol,
 )
 
 
@@ -24,7 +32,7 @@ class ScalperAgent(BaseAgent):
     ):
         super().__init__(symbol=symbol, agent_type=AgentType.SCALPER, initial_capital=initial_capital, **kwargs)
         # Randomize thresholds slightly so agents are not identical → no cascade failure
-        self.rsi_oversold   = rsi_oversold   or round(random.uniform(25, 35), 1)
+        self.rsi_oversold = rsi_oversold or round(random.uniform(25, 35), 1)
         self.rsi_overbought = rsi_overbought or round(random.uniform(65, 75), 1)
         self.atr_sl_multiplier = atr_sl_multiplier
         self.atr_tp_multiplier = atr_tp_multiplier

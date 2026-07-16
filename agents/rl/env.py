@@ -8,10 +8,12 @@ simplification (no slippage, no partial fills, no ATR-based SL/TP hit
 simulation) — good enough to bootstrap/refresh a policy that RLAgent then
 trades live through the real RiskEngine/broker.
 """
+
 from __future__ import annotations
+
+import gymnasium as gym
 import numpy as np
 import pandas as pd
-import gymnasium as gym
 from gymnasium import spaces
 
 from swarm_trading.agents.rl.features import N_FEATURES, build_observation_from_row
@@ -22,8 +24,8 @@ _DIRECTION = {ACTION_FLAT: 0.0, ACTION_LONG: 1.0, ACTION_SHORT: -1.0}
 REQUIRED_COLUMNS = {"close", "rsi_14", "atr_14", "ema_20", "ema_50", "ema_200"}
 
 
-class SwarmTradingEnv(gym.Env):
-    metadata = {"render_modes": []}
+class SwarmTradingEnv(gym.Env[np.ndarray, np.int64]):  # Discrete's sample type is np.int64, not int
+    metadata = {"render_modes": []}  # noqa: RUF012 — required shape per the gym.Env API, not app state
 
     def __init__(self, feature_df: pd.DataFrame, initial_equity_ratio: float = 1.0):
         super().__init__()
@@ -47,7 +49,7 @@ class SwarmTradingEnv(gym.Env):
         self._equity_ratio = self._initial_equity_ratio
         return self._obs(), {}
 
-    def step(self, action: int):
+    def step(self, action: np.int64):
         row = self._df.iloc[self._i]
         has_next = self._i + 1 < len(self._df)
         next_close = self._df.iloc[self._i + 1]["close"] if has_next else row["close"]

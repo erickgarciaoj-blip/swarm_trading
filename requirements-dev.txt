@@ -1,0 +1,15 @@
+# Dev-only tooling: lint, type-check, test, coverage, pre-commit hooks.
+# Not installed in the production image (see Dockerfile) — only in local
+# dev venvs and CI (see .github/workflows/ci.yml).
+-r requirements.txt
+
+pytest==8.2.2
+pytest-asyncio==0.23.7
+pytest-cov==5.0.0
+pandas-stubs==3.0.3.260530
+# black was dropped in favor of `ruff format` (black-compatible output) —
+# one tool for both lint and format instead of two that can drift out of
+# sync on config (line-length, target-version, etc).
+ruff==0.15.21
+mypy==1.10.0
+pre-commit==3.7.1

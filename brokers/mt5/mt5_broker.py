@@ -7,13 +7,18 @@ macOS/Linux build. Importing it is wrapped in try/except so this module (and
 therefore main.py/swarm_factory.py) stays importable on any OS; on Mac, run
 with app_env != "live" so IBKRBroker (paper trading) is used instead.
 """
+
 from __future__ import annotations
+
+import asyncio
 import uuid
 from datetime import datetime
+
 from loguru import logger
 
 try:
     import MetaTrader5 as mt5
+
     MT5_AVAILABLE = True
 except ImportError:
     MT5_AVAILABLE = False
@@ -21,16 +26,19 @@ except ImportError:
 from swarm_trading.brokers.adapters.broker_interface import BrokerInterface
 from swarm_trading.core.config import settings
 from swarm_trading.core.models import (
-    ExecutedTrade, OrderProposal, OrderStatus, Side,
+    ExecutedTrade,
+    OrderProposal,
+    OrderStatus,
+    Side,
 )
 
 # Symbol map: internal symbol → MT5 symbol name
 MT5_SYMBOL_MAP = {
     "XAUUSD": "XAUUSD",
-    "PLTR":   "PLTR",
+    "PLTR": "PLTR",
     "NAS100": "NAS100",
-    "US100":  "US100",
-    "OIL":    "USOIL",
+    "US100": "US100",
+    "OIL": "USOIL",
 }
 
 
@@ -50,7 +58,11 @@ class MT5Broker(BrokerInterface):
             logger.error("[MT5] MT5 no disponible en este OS — solo Windows. Usa IBKRBroker en Mac.")
             return False
         try:
-            ok = mt5.initialize(
+            # mt5.* calls are synchronous IPC to the MT5 terminal process —
+            # off the event loop (see
+            # docs/architecture/adr/0002-async-io-blocking-calls-must-use-executor.md).
+            ok = await asyncio.to_thread(
+                mt5.initialize,
                 login=settings.mt5_login,
                 password=settings.mt5_password,
                 server=settings.mt5_server,
@@ -66,7 +78,7 @@ class MT5Broker(BrokerInterface):
         if not MT5_AVAILABLE:
             return
         try:
-            mt5.shutdown()
+            await asyncio.to_thread(mt5.shutdown)
             self._connected = False
         except Exception:
             pass
@@ -75,7 +87,7 @@ class MT5Broker(BrokerInterface):
         self._require_mt5()
         mt5_symbol = MT5_SYMBOL_MAP.get(proposal.symbol.value, proposal.symbol.value)
         order_type = mt5.ORDER_TYPE_BUY if proposal.side == Side.LONG else mt5.ORDER_TYPE_SELL
-        price = mt5.symbol_info_tick(mt5_symbol)
+        price = await asyncio.to_thread(mt5.symbol_info_tick, mt5_symbol)
         entry = price.ask if proposal.side == Side.LONG else price.bid
 
         request = {
@@ -91,7 +103,7 @@ class MT5Broker(BrokerInterface):
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        result = mt5.order_send(request)
+        result = await asyncio.to_thread(mt5.order_send, request)
         status = OrderStatus.FILLED if result.retcode == mt5.TRADE_RETCODE_DONE else OrderStatus.REJECTED
         logger.info(f"[MT5] Order result: retcode={result.retcode} | agent={proposal.agent_id}")
 
@@ -110,22 +122,24 @@ class MT5Broker(BrokerInterface):
 
     async def get_open_positions(self) -> list[ExecutedTrade]:
         self._require_mt5()
-        positions = mt5.positions_get()
+        positions = await asyncio.to_thread(mt5.positions_get)
         result = []
         if positions:
             for p in positions:
-                result.append(ExecutedTrade(
-                    trade_id=str(p.ticket),
-                    agent_id=p.comment.split("|")[-1] if "|" in p.comment else "unknown",
-                    symbol=p.symbol,
-                    side=Side.LONG if p.type == 0 else Side.SHORT,
-                    entry_price=p.price_open,
-                    quantity=p.volume,
-                    sl_price=p.sl,
-                    tp_price=p.tp,
-                    status=OrderStatus.FILLED,
-                    pnl=p.profit,
-                ))
+                result.append(
+                    ExecutedTrade(
+                        trade_id=str(p.ticket),
+                        agent_id=p.comment.split("|")[-1] if "|" in p.comment else "unknown",
+                        symbol=p.symbol,
+                        side=Side.LONG if p.type == 0 else Side.SHORT,
+                        entry_price=p.price_open,
+                        quantity=p.volume,
+                        sl_price=p.sl,
+                        tp_price=p.tp,
+                        status=OrderStatus.FILLED,
+                        pnl=p.profit,
+                    )
+                )
         return result
 
     async def close_position(self, trade_id: str) -> ExecutedTrade:

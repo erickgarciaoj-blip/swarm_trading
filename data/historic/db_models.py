@@ -4,7 +4,9 @@ Mirrors the shapes of core.models.ExecutedTrade / SwarmOrchestrator.get_swarm_su
 but is intentionally a separate, DB-specific layer — core.models stays free of
 any ORM/SQLAlchemy dependency.
 """
+
 from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
