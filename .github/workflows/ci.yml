@@ -109,3 +109,57 @@ jobs:
           path: swarm_trading
       - name: Build production image
         run: docker build -t swarm-trading:ci swarm_trading
+
+  postgres-integration:
+    # Real postgres:16 (matches docker-compose.yml's pin) as a service
+    # container — Alembic is the sole schema authority (see ADR-0008), so
+    # this job applies migrations against it for real, then runs
+    # tests/integration/* against that actual schema. No SQLite fallback
+    # anywhere in this job: DATABASE_URL always points at the service
+    # container below, and the job fails outright if it's unreachable.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: swarm_trading_test
+          POSTGRES_USER: swarm
+          POSTGRES_PASSWORD: swarm_ci_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm -d swarm_trading_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://swarm:swarm_ci_test_password@localhost:5432/swarm_trading_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: swarm_trading/requirements-dev.txt
+      - run: pip install -r swarm_trading/requirements-dev.txt
+      - name: pip check
+        run: pip check
+      - name: alembic upgrade head (creates the real schema)
+        working-directory: swarm_trading
+        run: PYTHONPATH="$GITHUB_WORKSPACE" alembic upgrade head
+      - name: alembic current
+        working-directory: swarm_trading
+        run: PYTHONPATH="$GITHUB_WORKSPACE" alembic current
+      - name: alembic check (models match migrations, no drift)
+        working-directory: swarm_trading
+        run: PYTHONPATH="$GITHUB_WORKSPACE" alembic check
+      - name: alembic downgrade -1, then upgrade head again (reversibility)
+        working-directory: swarm_trading
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE" alembic downgrade -1
+          PYTHONPATH="$GITHUB_WORKSPACE" alembic upgrade head
+      - name: pytest tests/integration (real PostgreSQL, no coverage gate here)
+        working-directory: swarm_trading
+        run: PYTHONPATH="$GITHUB_WORKSPACE" pytest tests/integration/ -m integration -v --no-cov
