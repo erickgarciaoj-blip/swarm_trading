@@ -90,7 +90,13 @@ class AsyncRepository:
         try:
             async with self._engine.begin() as conn:
                 await conn.execute(text("SELECT 1"))
-        except SQLAlchemyError as exc:
+        except (SQLAlchemyError, OSError) as exc:
+            # SQLAlchemy only wraps statement-execution failures into
+            # SQLAlchemyError/DBAPIError — a pure connection-establishment
+            # failure (e.g. asyncpg/asyncio hitting a closed port) propagates
+            # the raw OSError/ConnectionRefusedError instead. Both are real
+            # "can't reach the database" cases and belong in the same
+            # clear-failure path.
             raise ConnectionError(
                 f"[Repository] Could not connect to the database ({self._engine.dialect.name}): {exc}"
             ) from exc
