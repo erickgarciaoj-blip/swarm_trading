@@ -10,6 +10,7 @@ for the same reason.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -101,6 +102,32 @@ class AsyncRepository:
                 f"[Repository] Could not connect to the database ({self._engine.dialect.name}): {exc}"
             ) from exc
         logger.info(f"[Repository] Connectivity OK ({self._engine.dialect.name})")
+
+    async def is_ready(self, timeout: float = 3.0) -> bool:
+        """Lightweight readiness probe for GET /health/ready — polled on every
+        health-check tick, so unlike init() it never raises or logs at INFO,
+        just returns a bool. Reuses self._engine's own connection pool (no
+        unmanaged raw connection per call) and bounds the probe with a short
+        timeout so a black-holed network doesn't hang the readiness check
+        indefinitely. asyncio.timeout() distinguishes "this probe timed out"
+        (raised as TimeoutError at the `async with` boundary) from genuine
+        outer task cancellation (still raised as CancelledError) — only the
+        former is treated as "not ready"; the latter always propagates."""
+        try:
+            async with asyncio.timeout(timeout):
+                async with self._engine.begin() as conn:
+                    await conn.execute(text("SELECT 1"))
+            return True
+        except asyncio.CancelledError:
+            raise
+        except (SQLAlchemyError, OSError, TimeoutError) as exc:
+            # Logged internally at debug (not exposed to the HTTP caller —
+            # see dashboard/api/routes.py::health_ready) so the specific
+            # driver error/credentials context never leaks into a public
+            # response, but the cause is still recorded for whoever reads
+            # container logs.
+            logger.debug(f"[Repository] Not ready ({self._engine.dialect.name}): {exc}")
+            return False
 
     async def save_trade(self, trade: ExecutedTrade) -> None:
         try:

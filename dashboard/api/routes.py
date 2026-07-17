@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -51,6 +52,22 @@ def set_repository(repo) -> None:
 
 @app.get("/health")
 async def health():
+    """Liveness only — the process is up and answering HTTP. Deliberately
+    never touches Postgres/Redis/yfinance/brokers: an external service being
+    down must not make Docker think *this* container is dead and restart it.
+    See /health/ready for the readiness check, and ADR-0009 for why those two
+    are kept separate."""
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness — confirms the app can actually serve traffic (Postgres
+    reachable), not just that the process is alive. Body deliberately stays
+    generic (no driver error text, no connection details) — the real cause
+    is only logged internally (see AsyncRepository.is_ready())."""
+    if _repository is None or not await _repository.is_ready():
+        return JSONResponse({"status": "not_ready"}, status_code=503)
     return {"status": "ok"}
 
 
