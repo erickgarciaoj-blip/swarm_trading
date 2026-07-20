@@ -190,8 +190,8 @@ jobs:
           REDIS_URL=redis://redis:6379/0
           EOF
 
-      - name: Build image
-        run: docker compose build
+      - name: Build images (including the proxy profile, so a broken nginx build fails here)
+        run: docker compose --profile proxy build
 
       - name: Bring up the stack (postgres -> migrate -> swarm, per the depends_on gate)
         run: docker compose up -d --wait --wait-timeout 120

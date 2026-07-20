@@ -109,7 +109,10 @@ services:
   # stable port in front of the app, not encryption. 127.0.0.1:8000 keeps
   # working directly regardless of whether this profile is enabled.
   nginx:
-    image: nginx:1.27-alpine
+    # Custom build, not the bare image — see nginx/Dockerfile for why (the
+    # upstream nginx:alpine image no longer includes anything this
+    # healthcheck could shell out to).
+    build: ./nginx
     restart: unless-stopped
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -123,7 +126,7 @@ services:
     profiles:
       - proxy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
       interval: 10s
       timeout: 5s
       retries: 5
