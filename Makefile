@@ -1,5 +1,6 @@
 .PHONY: install run mcp test test-integration coverage lint format typecheck precommit clean \
-	docker-build docker-up docker-down docker-restart docker-logs docker-shell migrate makemigrations
+	docker-build docker-up docker-up-proxy docker-down docker-restart docker-logs docker-shell \
+	migrate makemigrations db-backup db-restore
 
 install:
 	python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/pre-commit install
@@ -41,14 +42,19 @@ clean:
 docker-build:
 	docker compose build
 
-# Brings up Postgres, waits for it to be healthy, applies migrations, then
-# starts the app — in that order. `docker compose up swarm` alone would
-# start the app against a DB with no schema (see ADR-0008: the app never
-# creates tables itself).
+# Postgres -> migrate -> swarm ordering is now encoded directly in
+# docker-compose.yml's depends_on/condition graph (migrate is a required
+# gate, not an opt-in profile — see ADR-0009), so a single `up` does
+# everything the old three-command version did by hand. --wait blocks until
+# "swarm" reports healthy rather than returning as soon as containers start.
+# "nginx" stays excluded (profile "proxy") — use docker-up-proxy for that.
 docker-up:
-	docker compose up -d postgres
-	docker compose run --rm migrate
-	docker compose up -d swarm
+	docker compose up -d --wait
+
+# Same as docker-up, plus nginx in front of "swarm" (profile "proxy" — see
+# nginx/nginx.conf). Still no TLS; 127.0.0.1:8000 keeps working directly too.
+docker-up-proxy:
+	docker compose --profile proxy up -d --wait
 
 docker-down:
 	docker compose down
@@ -63,10 +69,45 @@ docker-shell:
 	docker compose exec swarm /bin/bash
 
 # Applies pending migrations. Never `alembic upgrade head` run from inside
-# the app itself — see data/historic/repository.py::init().
+# the app itself — see data/historic/repository.py::init(). Runs
+# automatically as part of docker-up too; this is for running it standalone
+# (e.g. after pulling a new image without restarting "swarm").
 migrate:
 	docker compose run --rm migrate
 
 # Usage: make makemigrations msg="add index on trades.opened_at"
 makemigrations:
 	docker compose run --rm swarm alembic revision --autogenerate -m "$(msg)"
+
+# Usage: make db-backup [file=backups/my-backup.sql.gz]
+# Defaults to a timestamped path under backups/. Refuses to overwrite an
+# existing file, never prints POSTGRES_PASSWORD (pg_dump runs inside the
+# "postgres" container over its local socket, which the official postgres
+# image trusts without a password for local connections — the credential
+# never touches this shell command), and validates the dump is a
+# non-empty, structurally intact archive before calling it a success.
+db-backup:
+	@set -euo pipefail; \
+	file="$(file)"; \
+	if [ -z "$$file" ]; then file="backups/swarm_trading_$$(date +%Y%m%dT%H%M%SZ).sql.gz"; fi; \
+	if [ -e "$$file" ]; then echo "Refusing to overwrite existing backup: $$file" >&2; exit 1; fi; \
+	mkdir -p "$$(dirname "$$file")"; \
+	docker compose exec -T postgres sh -c 'pg_dump -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" --format=custom' | gzip > "$$file"; \
+	if [ ! -s "$$file" ]; then echo "Backup file is empty — deleting: $$file" >&2; rm -f "$$file"; exit 1; fi; \
+	gzip -t "$$file" || { echo "Backup failed gzip integrity check — deleting: $$file" >&2; rm -f "$$file"; exit 1; }; \
+	echo "Backup written and validated: $$file"
+
+# Usage: make db-restore file=backups/swarm_trading_20260720T120000Z.sql.gz
+# Requires an explicit file (no default — restoring the wrong backup by
+# accident is worse than a missing default). Validates gzip integrity
+# before touching the database at all, and pg_restore's --clean --if-exists
+# drops existing objects first so the restore doesn't fail on conflicts
+# with the current schema.
+db-restore:
+	@set -euo pipefail; \
+	file="$(file)"; \
+	if [ -z "$$file" ]; then echo "Usage: make db-restore file=<path>" >&2; exit 1; fi; \
+	if [ ! -f "$$file" ]; then echo "Backup file not found: $$file" >&2; exit 1; fi; \
+	gzip -t "$$file" || { echo "Backup file failed gzip integrity check — refusing to restore: $$file" >&2; exit 1; }; \
+	gunzip -c "$$file" | docker compose exec -T postgres sh -c 'pg_restore -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" --clean --if-exists'; \
+	echo "Restore complete from: $$file"

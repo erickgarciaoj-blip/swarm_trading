@@ -1,4 +1,10 @@
-FROM python:3.11-slim
+# Pinned to the Debian codename (bookworm), not just the floating "slim" tag
+# — python:3.11-slim silently re-points to whatever Debian release is
+# current (it already did bullseye -> bookworm once), which can change the
+# apt package set under this image without anything in this repo changing.
+# An exact patch version (python:3.11.x-slim-bookworm) or a content digest
+# would pin further still; not done here — see ADR-0009 for the tradeoff.
+FROM python:3.11-slim-bookworm
 
 # build-essential: safety net for any pinned package without a prebuilt wheel
 # for this platform/arch (most of requirements.txt ships manylinux wheels —
@@ -22,9 +28,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /data \
-    && useradd --create-home --uid 1000 swarm \
-    && chown -R swarm:swarm /app /data
+RUN useradd --create-home --uid 1000 swarm \
+    && chown -R swarm:swarm /app
 USER swarm
 
 EXPOSE 8000
