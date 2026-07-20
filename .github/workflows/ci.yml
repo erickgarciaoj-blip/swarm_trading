@@ -220,6 +220,9 @@ jobs:
             test -d /app/swarm_trading/alembic
           '
 
+      - name: Report final image size
+        run: docker images swarm_trading-swarm --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
+
       - name: "Negative test: a failing migration must block swarm from starting"
         # Isolated Compose project (-p) plus an override that makes "migrate"
         # fail deterministically — this can never collide with, or be masked
