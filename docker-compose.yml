@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     # Pinned major version, not `latest` — an unannounced major bump here
@@ -20,15 +26,38 @@ services:
       retries: 10
     networks:
       - swarm_net
+    logging: *default-logging
     # Not exposed to the host on purpose — only the "swarm"/"migrate"
     # services on swarm_net can reach it. Use an SSH tunnel or
     # `docker compose exec postgres psql ...` for manual inspection.
 
-  # One-off: `docker compose run --rm migrate` applies pending Alembic
-  # migrations. Never starts automatically (profile "tools") and is never a
-  # substitute for `alembic upgrade head` being run before "swarm" serves
-  # traffic — the app itself never creates or modifies schema (see
-  # data/historic/repository.py::init() and ADR-0008).
+  # Ephemeral cache/pub-sub backend — no volume, persistence disabled below.
+  # Nothing in the app imports redis yet (see ARCHITECTURE_REVIEW.md Fase 5:
+  # CachePort/PubSubPort protocols land later); it's provisioned now so Fase 5
+  # doesn't need another compose change to land. "swarm" deliberately has no
+  # depends_on here — an unused dependency failing to start must not block
+  # the trading process from coming up.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - swarm_net
+    logging: *default-logging
+
+  # Applies pending Alembic migrations. Runs automatically as part of
+  # `docker compose up` (no profile — this is a required gate, not an
+  # opt-in tool) and exits 0/non-zero; "swarm" below gates its own start on
+  # that exit via `condition: service_completed_successfully`, so a failed
+  # migration blocks the app from ever serving traffic against a
+  # stale/mismatched schema. The app itself never creates or modifies
+  # schema (see data/historic/repository.py::init() and ADR-0009). Can
+  # still be run standalone with `docker compose run --rm migrate`.
   migrate:
     build: .
     env_file:
@@ -41,8 +70,7 @@ services:
     networks:
       - swarm_net
     entrypoint: ["alembic", "upgrade", "head"]
-    profiles:
-      - tools
+    logging: *default-logging
 
   swarm:
     build: .
@@ -54,6 +82,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness only (/health, never /health/ready) — Docker restarting this
+      # container because Postgres is briefly unreachable would be worse than
+      # doing nothing; see dashboard/api/routes.py and ADR-0009.
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     ports:
       # Bound to localhost only — the dashboard has no auth, and /swarm/halt
       # is an unauthenticated POST. Reach it via an SSH tunnel:
@@ -62,6 +101,36 @@ services:
       - "127.0.0.1:8000:8000"
     networks:
       - swarm_net
+    logging: *default-logging
+
+  # Reverse proxy — opt-in via `docker compose --profile proxy up -d`.
+  # Forwards HTTP + WebSocket-upgrade traffic to "swarm"; still no TLS (see
+  # nginx/nginx.conf and ADR-0009), so this buys you real headers and a
+  # stable port in front of the app, not encryption. 127.0.0.1:8000 keeps
+  # working directly regardless of whether this profile is enabled.
+  nginx:
+    # Custom build, not the bare image — see nginx/Dockerfile for why (the
+    # upstream nginx:alpine image no longer includes anything this
+    # healthcheck could shell out to).
+    build: ./nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      swarm:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    networks:
+      - swarm_net
+    profiles:
+      - proxy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
 
 volumes:
   # swarm_data (the old SQLite-file volume) is gone — Postgres, on its own

@@ -163,3 +163,165 @@ jobs:
       - name: pytest tests/integration (real PostgreSQL, no coverage gate here)
         working-directory: swarm_trading
         run: PYTHONPATH="$GITHUB_WORKSPACE" pytest tests/integration/ -m integration -v --no-cov
+
+  docker-stack-integration:
+    # End-to-end validation of docker-compose.yml itself, not just the image.
+    # docker-build above only proves the image builds; this proves the stack
+    # it's part of actually comes up in the right order (see ADR-0009):
+    # migration-as-gate really gates, liveness/readiness are really separate,
+    # and the optional nginx profile really proxies a live WebSocket.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: swarm_trading
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+
+      - name: Write CI .env
+        run: |
+          cat > .env <<'EOF'
+          APP_ENV=development
+          POSTGRES_DB=swarm_trading_ci
+          POSTGRES_USER=swarm
+          POSTGRES_PASSWORD=swarm_ci_stack_password
+          DATABASE_URL=postgresql+asyncpg://swarm:swarm_ci_stack_password@postgres:5432/swarm_trading_ci
+          REDIS_URL=redis://redis:6379/0
+          EOF
+
+      - name: Build images (including the proxy profile, so a broken nginx build fails here)
+        run: docker compose --profile proxy build
+
+      - name: Bring up the stack (postgres -> migrate -> swarm, per the depends_on gate)
+        run: docker compose up -d --wait --wait-timeout 120
+
+      - name: Liveness (/health) — must never depend on Postgres/Redis
+        run: |
+          curl -sf http://127.0.0.1:8000/health \
+            | python3 -c "import sys, json; d = json.load(sys.stdin); assert d == {'status': 'ok'}, d"
+
+      - name: Readiness (/health/ready) — confirms Postgres is actually reachable
+        run: |
+          curl -sf http://127.0.0.1:8000/health/ready \
+            | python3 -c "import sys, json; d = json.load(sys.stdin); assert d == {'status': 'ok'}, d"
+
+      - name: "PyTorch is the CPU-only build; no CUDA/NVIDIA anywhere; a minimal RL load+inference works"
+        run: |
+          docker compose exec -T swarm python <<'PYEOF'
+          import subprocess
+          import sys
+
+          import torch
+
+          print(f"torch version: {torch.__version__}")
+          assert "+cpu" in torch.__version__, f"expected the +cpu build, got {torch.__version__}"
+          assert torch.cuda.is_available() is False, "CUDA must not be available in the CPU-only build"
+
+          installed = subprocess.check_output([sys.executable, "-m", "pip", "list"], text=True).splitlines()
+          nvidia_pkgs = [line for line in installed if line.lower().startswith("nvidia-")]
+          assert not nvidia_pkgs, f"unexpected NVIDIA packages installed: {nvidia_pkgs}"
+
+          # Same construction RLAgent._build_fresh_model() uses for a
+          # cold-start agent (agents/rl/rl_agent.py) — proves the CPU wheel
+          # can actually build a policy network and run a forward pass
+          # through this project's own env, not just import successfully.
+          import pandas as pd
+          from stable_baselines3 import PPO
+
+          from swarm_trading.agents.rl.env import SwarmTradingEnv
+
+          dummy_df = pd.DataFrame(
+              [{"close": 1.0, "rsi_14": 50.0, "atr_14": 0.01, "ema_20": 1.0, "ema_50": 1.0, "ema_200": 1.0}] * 2
+          )
+          env = SwarmTradingEnv(dummy_df)
+          model = PPO("MlpPolicy", env, verbose=0)
+          obs, _ = env.reset()
+          action, _ = model.predict(obs, deterministic=True)
+          print(f"minimal RL load+inference OK, action={int(action)}")
+          PYEOF
+
+      - name: Final image contains no dev-only files (.dockerignore took effect)
+        run: |
+          docker compose run --rm --no-deps --entrypoint sh swarm -c '
+            set -e
+            for f in tests requirements-dev.txt .pre-commit-config.yaml README.md ARCHITECTURE_REVIEW.md docs .git .github; do
+              if [ -e "/app/swarm_trading/$f" ]; then
+                echo "unexpected in final image: $f" >&2
+                exit 1
+              fi
+            done
+            test -f /app/swarm_trading/alembic.ini
+            test -d /app/swarm_trading/alembic
+          '
+
+      - name: Report final image size
+        run: docker images swarm_trading-swarm --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
+
+      - name: "Negative test: a failing migration must block swarm from starting"
+        # Isolated Compose project (-p) plus an override that makes "migrate"
+        # fail deterministically — this can never collide with, or be masked
+        # by, the primary stack already running above.
+        run: |
+          cat > ci-migration-gate-override.yml <<'EOF'
+          services:
+            migrate:
+              entrypoint: ["sh", "-c", "echo 'CI: intentionally broken migration' >&2; exit 1"]
+          EOF
+          set +e
+          docker compose -p swarm_gate_ci -f docker-compose.yml -f ci-migration-gate-override.yml up -d --wait --wait-timeout 60
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "expected 'docker compose up' to fail on a broken migration, it succeeded" >&2
+            exit 1
+          fi
+          running="$(docker compose -p swarm_gate_ci -f docker-compose.yml -f ci-migration-gate-override.yml ps -q swarm)"
+          if [ -n "$running" ]; then
+            echo "'swarm' container exists despite the migration gate failing" >&2
+            exit 1
+          fi
+          echo "Migration gate held: swarm correctly never started."
+
+      - name: Diagnostics for the migration-gate project (on failure)
+        if: failure()
+        run: |
+          docker compose -p swarm_gate_ci -f docker-compose.yml -f ci-migration-gate-override.yml ps
+          docker compose -p swarm_gate_ci -f docker-compose.yml -f ci-migration-gate-override.yml logs
+
+      - name: Tear down the migration-gate project
+        if: always()
+        run: |
+          docker compose -p swarm_gate_ci -f docker-compose.yml -f ci-migration-gate-override.yml down -v
+          rm -f ci-migration-gate-override.yml
+
+      - name: Bring up the reverse proxy (--profile proxy)
+        run: docker compose --profile proxy up -d --wait --wait-timeout 60 nginx
+
+      - name: Real WebSocket round-trip through nginx
+        run: |
+          pip install --quiet websocket-client
+          python3 - <<'EOF'
+          import json
+
+          from websocket import create_connection
+
+          ws = create_connection("ws://127.0.0.1:8080/ws", timeout=10)
+          try:
+              raw = ws.recv()
+          finally:
+              ws.close()
+
+          snapshot = json.loads(raw)
+          assert isinstance(snapshot, dict), f"expected a JSON object over the proxied WebSocket, got {snapshot!r}"
+          EOF
+
+      - name: Full diagnostics on failure (primary stack)
+        if: failure()
+        run: |
+          docker compose --profile proxy ps
+          docker compose --profile proxy logs
+
+      - name: Tear down the primary stack
+        if: always()
+        run: docker compose --profile proxy down -v

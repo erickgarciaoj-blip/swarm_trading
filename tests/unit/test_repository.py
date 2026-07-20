@@ -1,5 +1,6 @@
 """Unit tests for AsyncRepository (SQLAlchemy 2.0 async persistence layer)."""
 
+import asyncio
 from datetime import datetime
 
 import pytest
@@ -130,3 +131,71 @@ async def test_static_pool_only_applied_to_sqlite_memory_url():
     assert not isinstance(pg_repo._engine.pool, StaticPool)
 
     await pg_repo.close()
+
+
+class _HangingConnection:
+    async def execute(self, _stmt):
+        await asyncio.sleep(1000)
+
+
+class _HangingEngineCtx:
+    async def __aenter__(self):
+        return _HangingConnection()
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+
+class _HangingEngine:
+    """Stands in for a connection attempt that never resolves — the only way
+    to exercise is_ready()'s timeout/cancellation paths without a real
+    network-level hang."""
+
+    dialect = type("_Dialect", (), {"name": "fake"})()
+
+    def begin(self):
+        return _HangingEngineCtx()
+
+    async def dispose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_is_ready_true_when_reachable(repo):
+    assert await repo.is_ready() is True
+
+
+@pytest.mark.asyncio
+async def test_is_ready_false_when_unreachable():
+    bad_repo = AsyncRepository("sqlite+aiosqlite:////this/path/does/not/exist/at/all.db")
+
+    assert await bad_repo.is_ready() is False
+
+    await bad_repo.close()
+
+
+@pytest.mark.asyncio
+async def test_is_ready_returns_false_on_timeout_not_raise():
+    """A probe that exceeds its own timeout is "not ready", not an error —
+    callers (GET /health/ready) poll this every tick and must never see an
+    exception from a merely-slow database."""
+    r = AsyncRepository(MEMORY_DB_URL)
+    r._engine = _HangingEngine()  # type: ignore[assignment]
+
+    assert await r.is_ready(timeout=0.05) is False
+
+
+@pytest.mark.asyncio
+async def test_is_ready_propagates_real_cancellation_not_swallowed_as_not_ready():
+    """Task cancellation (e.g. the ASGI server cancelling an in-flight
+    request) must never be caught and turned into `False` — only the probe's
+    own internal timeout is treated as "not ready"."""
+    r = AsyncRepository(MEMORY_DB_URL)
+    r._engine = _HangingEngine()  # type: ignore[assignment]
+
+    task = asyncio.ensure_future(r.is_ready(timeout=10))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task

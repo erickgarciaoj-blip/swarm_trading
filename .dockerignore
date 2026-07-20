@@ -1,13 +1,39 @@
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
 venv/
 .env
+.env.*
+!.env.example
 *.log
+*.csv
 *.db
 *.db-journal
 *.sqlite3
 agents/rl/checkpoints/
+
+# VCS / editor / OS
 .git/
+.github/
 .vscode/
+.DS_Store
+Thumbs.db
+
+# Test/lint tool artifacts — not needed at runtime, and stale cache
+# from the host would otherwise shadow what the image actually ran.
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 .pytest_cache/
+
+# Dev-only tooling and docs — not imported by the running app.
+requirements-dev.txt
+.pre-commit-config.yaml
+docs/
+tests/
+scripts/
+ARCHITECTURE_REVIEW.md
+README.md
