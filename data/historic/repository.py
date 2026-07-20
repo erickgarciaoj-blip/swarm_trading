@@ -21,11 +21,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.pool import StaticPool
 
 from swarm_trading.core.models import ExecutedTrade
-from swarm_trading.data.historic.db_models import AgentORM, SwarmSnapshotORM, TradeORM
+from swarm_trading.data.historic.db_models import AgentORM, RiskStateORM, SwarmSnapshotORM, TradeORM
+from swarm_trading.risk.engine.risk_engine import RiskStateSnapshot
 
 # Rows/snapshots serialize to plain JSON-able dicts (str/float/int/None
 # values) for the dashboard API — not worth a dataclass per shape here.
 JSONDict = dict[str, Any]
+
+# risk_state is a single-row table — the swarm's halt state is global, not
+# per-agent (see ADR-0010). This id is fixed rather than autoincrement.
+_RISK_STATE_ID = 1
 
 
 def normalize_async_url(url: str) -> str:
@@ -250,6 +255,62 @@ class AsyncRepository:
         except Exception as exc:
             logger.warning(f"[Repository] get_agent_equity_curve failed: {exc}")
             return []
+
+    async def save_risk_state(self, snapshot: RiskStateSnapshot) -> None:
+        try:
+            values = {
+                "id": _RISK_STATE_ID,
+                "daily_reference_equity": snapshot.daily_reference_equity,
+                "daily_reference_date": snapshot.daily_reference_date,
+                "daily_halted": snapshot.daily_halted,
+                "daily_halted_at": snapshot.daily_halted_at,
+                "daily_halt_observed_value": snapshot.daily_halt_observed_value,
+                "sticky_halted": snapshot.sticky_halted,
+                "halt_cause": snapshot.halt_cause,
+                "halted_at": snapshot.halted_at,
+                "halt_observed_value": snapshot.halt_observed_value,
+            }
+            insert = postgresql.insert if self._engine.dialect.name == "postgresql" else sqlite.insert
+            update_cols = {k: v for k, v in values.items() if k != "id"}
+            stmt = (
+                insert(RiskStateORM)
+                .values(**values)
+                .on_conflict_do_update(  # type: ignore[attr-defined]
+                    index_elements=["id"],
+                    set_=update_cols,
+                )
+            )
+            async with self._session_factory() as session:
+                await session.execute(stmt)
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Repository] save_risk_state failed: {exc}")
+
+    async def load_risk_state(self) -> RiskStateSnapshot | None:
+        """Unlike every other read method in this class, this one is
+        intentionally NOT fail-soft: a daily/total-loss halt must never be
+        silently dropped just because the DB hiccuped on read at startup — a
+        process restart must not silently reactivate the swarm (see
+        ADR-0010). Raises on failure; main.py already treats a dead DB at
+        startup as fatal for repository.init() for the same reason (see
+        ADR-0008), and this call only ever runs after init() has already
+        succeeded."""
+        async with self._session_factory() as session:
+            result = await session.execute(select(RiskStateORM).where(RiskStateORM.id == _RISK_STATE_ID))
+            row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return RiskStateSnapshot(
+            daily_reference_equity=row.daily_reference_equity,
+            daily_reference_date=row.daily_reference_date,
+            daily_halted=row.daily_halted,
+            daily_halted_at=row.daily_halted_at,
+            daily_halt_observed_value=row.daily_halt_observed_value,
+            sticky_halted=row.sticky_halted,
+            halt_cause=row.halt_cause,
+            halted_at=row.halted_at,
+            halt_observed_value=row.halt_observed_value,
+        )
 
     async def close(self) -> None:
         await self._engine.dispose()

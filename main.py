@@ -58,6 +58,10 @@ async def main():
     # ── Build orchestrator and register agents ─────────────────────────
     orch = SwarmOrchestrator(broker=broker, market_feed=market_feed, news_feed=news_feed, repository=repo)
     orch.set_broadcaster(ws_manager.broadcast)
+    # Deliberately unguarded — a restart must never silently clear a
+    # persisted daily/total-loss halt. See ADR-0010 and
+    # AsyncRepository.load_risk_state's docstring.
+    await orch.restore_risk_state()
     total = await build_swarm(orch, repository=repo)
     logger.info(f"[Main] Swarm ready — {total} agents registered")
 

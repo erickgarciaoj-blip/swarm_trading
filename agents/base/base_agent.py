@@ -90,7 +90,7 @@ class BaseAgent(ABC):
         self._total_trades += 1
         if trade.pnl > 0:
             self._wins += 1
-        self.update_equity(self.equity + trade.pnl)
+        self.update_equity(self.equity + trade.pnl - trade.commission)
 
     def get_metrics(self) -> AgentMetrics:
         win_rate = self._wins / self._total_trades if self._total_trades else 0.0

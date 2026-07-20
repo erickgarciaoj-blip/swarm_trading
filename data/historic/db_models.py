@@ -7,9 +7,9 @@ any ORM/SQLAlchemy dependency.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -55,3 +55,24 @@ class SwarmSnapshotORM(Base):
     daily_pnl: Mapped[float] = mapped_column(Float)
     active_agents: Mapped[int] = mapped_column(Integer)
     total_trades: Mapped[int] = mapped_column(Integer)
+
+
+class RiskStateORM(Base):
+    """Single-row table (id is always RISK_STATE_ID) holding the swarm-wide
+    daily-loss and total-loss halt state — see
+    docs/architecture/adr/0010-daily-and-total-loss-halt.md and
+    RiskEngine.snapshot_state/restore_state."""
+
+    __tablename__ = "risk_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    daily_reference_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    daily_reference_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    daily_halted: Mapped[bool] = mapped_column(Boolean, default=False)
+    daily_halted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    daily_halt_observed_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sticky_halted: Mapped[bool] = mapped_column(Boolean, default=False)
+    halt_cause: Mapped[str | None] = mapped_column(String, nullable=True)
+    halted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    halt_observed_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
