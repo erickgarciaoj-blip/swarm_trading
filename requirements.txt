@@ -28,7 +28,20 @@ yfinance==1.5.1
 pandas-market-calendars==5.4.0  # exact NYSE/CME/NYMEX exchange calendars for market-hours checks
 
 # ML / RL
-torch==2.13.0
+# torch's default Linux wheel (plain PyPI, no local version suffix) bundles
+# CUDA/cuDNN/cuBLAS — multiple GB of NVIDIA shared libraries — even though
+# nothing here touches a GPU (RL inference is CPU-only, see
+# docs/architecture/adr/0001-rl-inference-only-in-production.md). The
+# CPU-only build lives on PyTorch's own wheel index under a "+cpu" local
+# version, hence --extra-index-url below plus a platform split: Linux (CI
+# runners, the Docker image) gets the +cpu build; macOS never had a CUDA
+# build to opt out of, so it keeps the plain PyPI version it already used.
+# --extra-index-url is file-scoped, so it also applies when this file is
+# pulled in via `-r requirements.txt` (requirements-dev.txt) — same pin
+# everywhere, nothing depends on machine-local pip config.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu ; sys_platform == "linux"
+torch==2.13.0 ; sys_platform != "linux"
 stable-baselines3==2.3.2
 gymnasium==0.29.1
 

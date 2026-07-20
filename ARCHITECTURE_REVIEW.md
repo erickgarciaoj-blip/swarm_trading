@@ -45,6 +45,7 @@
 | D9 | Sin CI (`.github/workflows` no existe), sin `.pre-commit-config.yaml`, sin config de coverage. | raíz del repo | Cero red de seguridad automática hoy. |
 | D10 | Dashboard sin autenticación — `/swarm/halt` es POST público sin login. | `dashboard/api/routes.py` | Crítico antes de exponer el puerto públicamente o conectar a broker live (dinero real). |
 | D11 | Cruft sin trackear en el working tree (`agents/scalper/.permtest`, `swarm_trading.db-journal`). | raíz | Housekeeping. |
+| D12 | `.env.example` documentaba `RISK_MAX_DAILY_LOSS_PCT` como si existiera un límite de pérdida diaria, pero `SwarmSettings` (`core/config.py`) no tiene un campo `risk_max_daily_loss_pct` — la variable se leía y se descartaba silenciosamente (`extra="ignore"`), y no hay ningún control de pérdida *diaria* en `risk/engine/risk_engine.py` ni en ningún otro módulo. Solo existe `risk_max_total_loss_pct` (pérdida total acumulada). Encontrado auditando `.env.example` variable por variable durante la verificación de Fase 4 (docker-stack); no corregido en esa fase — cambiar el comportamiento de `RiskEngine` está fuera de su alcance. | `.env.example` (previo a Fase 4), `core/config.py`, `risk/engine/risk_engine.py` | Riesgo real de sobreestimar la protección FTMO-style del swarm: se puede asumir que existe un guardrail de "5% de pérdida diaria" que en realidad nunca se aplica. |
 
 ---
 

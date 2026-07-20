@@ -206,6 +206,41 @@ jobs:
           curl -sf http://127.0.0.1:8000/health/ready \
             | python3 -c "import sys, json; d = json.load(sys.stdin); assert d == {'status': 'ok'}, d"
 
+      - name: "PyTorch is the CPU-only build; no CUDA/NVIDIA anywhere; a minimal RL load+inference works"
+        run: |
+          docker compose exec -T swarm python <<'PYEOF'
+          import subprocess
+          import sys
+
+          import torch
+
+          print(f"torch version: {torch.__version__}")
+          assert "+cpu" in torch.__version__, f"expected the +cpu build, got {torch.__version__}"
+          assert torch.cuda.is_available() is False, "CUDA must not be available in the CPU-only build"
+
+          installed = subprocess.check_output([sys.executable, "-m", "pip", "list"], text=True).splitlines()
+          nvidia_pkgs = [line for line in installed if line.lower().startswith("nvidia-")]
+          assert not nvidia_pkgs, f"unexpected NVIDIA packages installed: {nvidia_pkgs}"
+
+          # Same construction RLAgent._build_fresh_model() uses for a
+          # cold-start agent (agents/rl/rl_agent.py) — proves the CPU wheel
+          # can actually build a policy network and run a forward pass
+          # through this project's own env, not just import successfully.
+          import pandas as pd
+          from stable_baselines3 import PPO
+
+          from swarm_trading.agents.rl.env import SwarmTradingEnv
+
+          dummy_df = pd.DataFrame(
+              [{"close": 1.0, "rsi_14": 50.0, "atr_14": 0.01, "ema_20": 1.0, "ema_50": 1.0, "ema_200": 1.0}] * 2
+          )
+          env = SwarmTradingEnv(dummy_df)
+          model = PPO("MlpPolicy", env, verbose=0)
+          obs, _ = env.reset()
+          action, _ = model.predict(obs, deterministic=True)
+          print(f"minimal RL load+inference OK, action={int(action)}")
+          PYEOF
+
       - name: Final image contains no dev-only files (.dockerignore took effect)
         run: |
           docker compose run --rm --no-deps --entrypoint sh swarm -c '
