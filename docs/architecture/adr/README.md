@@ -18,6 +18,7 @@ Se escriben de forma incremental, fase por fase (ver `ARCHITECTURE_REVIEW.md` en
 | [0008](0008-postgresql-alembic-schema-authority.md) | PostgreSQL como base de datos de runtime, Alembic como única autoridad de esquema (fin de `create_all()`) | Fase 3 | Aceptado |
 | [0009](0009-docker-stack-gate-liveness-readiness.md) | Stack Docker completo: migración como gate mecánico, Redis efímero, nginx opcional, liveness ≠ readiness | Fase 4 | Aceptado |
 | [0010](0010-daily-and-total-loss-halt.md) | Halt diario (15%) y halt total (30%) en RiskEngine, con persistencia y reactivación explícita (cierra D12) | Fase 4.5 | Aceptado |
+| [0011](0011-vps-staging-deployment.md) | Deployment automático a staging en VPS propio: bundle firmado por SHA sobre SSH restringido, frontera de seguridad fija, imágenes inmutables en GHCR | Fase 4.6 | Aceptado |
 
 ## Formato
 
