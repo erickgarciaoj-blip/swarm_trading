@@ -142,14 +142,14 @@ async def swarm_history(limit: int | None = None):
 @app.post("/swarm/halt")
 async def halt_swarm():
     if _orchestrator:
-        _orchestrator._risk.halt("manual via dashboard")
+        await _orchestrator._risk.halt("manual via dashboard")
     return {"halted": True}
 
 
 @app.post("/swarm/resume")
 async def resume_swarm():
     if _orchestrator:
-        _orchestrator._risk.resume()
+        await _orchestrator._risk.resume()
     return {"halted": False}
 
 

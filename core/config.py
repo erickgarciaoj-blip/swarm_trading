@@ -50,7 +50,8 @@ class SwarmSettings(BaseSettings):
     swarm_target_multiplier: float = 10.0
 
     # Risk (FTMO-style)
-    risk_max_total_loss_pct: float = 0.50
+    risk_max_daily_loss_pct: float = 0.15
+    risk_max_total_loss_pct: float = 0.30
     risk_max_agents_per_symbol: int = 10
     risk_news_blackout_min: int = 5
     risk_min_entry_pct: float = 0.03
@@ -79,6 +80,22 @@ class SwarmSettings(BaseSettings):
                 f"DATABASE_URL must point to PostgreSQL when APP_ENV={self.app_env!r} "
                 "(got a sqlite:// URL). SQLite is for local development and unit tests "
                 "only. Set DATABASE_URL=postgresql+asyncpg://... in .env."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _valid_risk_loss_limits(self) -> "SwarmSettings":
+        """See docs/architecture/adr/0010-daily-and-total-loss-halt.md. Both
+        limits are fractions (0.15 == 15%), matching every other risk_*_pct
+        field in this class — not raw 0-100 percentages."""
+        for field_name in ("risk_max_daily_loss_pct", "risk_max_total_loss_pct"):
+            value = getattr(self, field_name)
+            if not (0 < value < 1):
+                raise ValueError(f"{field_name} must be strictly between 0 and 1 (got {value!r})")
+        if self.risk_max_daily_loss_pct > self.risk_max_total_loss_pct:
+            raise ValueError(
+                f"risk_max_daily_loss_pct ({self.risk_max_daily_loss_pct!r}) must not exceed "
+                f"risk_max_total_loss_pct ({self.risk_max_total_loss_pct!r})"
             )
         return self
 

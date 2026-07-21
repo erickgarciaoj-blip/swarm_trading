@@ -91,7 +91,7 @@ async def test_migrations_created_the_expected_schema(repo: AsyncRepository) -> 
     # alembic_version is Alembic's own bookkeeping table (tracks the applied
     # revision) — it's a genuine, expected part of what `alembic upgrade
     # head` creates, alongside this project's own 3 tables.
-    assert set(table_names) == {"agents", "trades", "swarm_snapshots", "alembic_version"}
+    assert set(table_names) == {"agents", "trades", "swarm_snapshots", "risk_state", "alembic_version"}
 
 
 @pytest.mark.asyncio

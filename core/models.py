@@ -113,6 +113,10 @@ class ExecutedTrade:
     tp_price: float
     status: OrderStatus
     pnl: float = 0.0
+    # Broker-reported commission/fees for this trade, when the broker
+    # populates it (default 0.0 — no adapter sets this yet). Netted out of
+    # RiskEngine's daily PnL accounting; see ADR-0010.
+    commission: float = 0.0
     opened_at: datetime = field(default_factory=datetime.utcnow)
     closed_at: datetime | None = None
 
