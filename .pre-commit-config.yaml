@@ -23,14 +23,18 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        # PYTHONPATH=.. — this repo's root package is literally named
-        # `swarm_trading` (see ADR-0002); mypy needs the *parent* dir on the
-        # path to resolve `swarm_trading.*` imports, same as running the app.
+        # scripts/run_mypy_precommit.sh — portable across the main checkout,
+        # any git worktree, or any other checkout name/location. Directly
+        # hardcoding `.venv/bin/mypy` + PYTHONPATH here broke in any worktree
+        # not literally named `swarm_trading` (see ADR-0002 on why mypy cares
+        # about that name at all); the script resolves the main checkout's
+        # .venv and the naming requirement without assuming either. Validate
+        # changes to it with scripts/test_precommit_worktree_portability.sh.
         # Runs on the whole project (pass_filenames: false), not just staged
         # files, because per-file invocation hits "found twice under
         # different module names" given that same layout quirk.
-        entry: bash -c 'PYTHONPATH="$(cd .. && pwd)" .venv/bin/mypy --config-file pyproject.toml .'
-        language: system
+        entry: scripts/run_mypy_precommit.sh
+        language: script
         types: [python]
         exclude: ^alembic/
         pass_filenames: false
