@@ -64,10 +64,10 @@ class _FakeRiskEngine:
         self.halted_reason = None
         self.resumed = False
 
-    def halt(self, reason):
+    async def halt(self, reason):
         self.halted_reason = reason
 
-    def resume(self):
+    async def resume(self):
         self.resumed = True
 
 

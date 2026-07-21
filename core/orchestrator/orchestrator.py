@@ -72,7 +72,10 @@ class SwarmOrchestrator:
         self._market_feed = market_feed
         self._news_feed = news_feed
         self._repository = repository
-        self._risk = RiskEngine()
+        # AsyncRepository.save_risk_state matches RiskStatePersistor's shape
+        # structurally (see risk_engine.py) — passed straight through, no
+        # adapter needed; repository=None keeps the "DB is optional" stance.
+        self._risk = RiskEngine(persistor=repository)
         self._running = False
         self._broadcast: Broadcaster = _noop_broadcaster
         # Fire-and-forget DB writes (save_trade) must be kept referenced
@@ -132,11 +135,13 @@ class SwarmOrchestrator:
                         logger.warning(f"[Swarm] Skipping {symbol.value} this tick: {exc}")
 
                 self._floating_pnl = await self._compute_floating_pnl()
-                # Must run after floating PnL is refreshed above — the
-                # daily-loss halt (RISK_MAX_DAILY_LOSS_PCT) is evaluated
-                # against realized + unrealized equity. See ADR-0010.
-                self._risk.update_daily_tracking(self._compute_total_equity())
-                await self._persist_risk_state_if_dirty()
+                # Must run after floating PnL is refreshed above — both the
+                # total-loss (30%) and daily-loss (15%) halts are evaluated
+                # against realized + unrealized equity. See ADR-0010. Any
+                # transition triggered here already persists immediately,
+                # inside this call — the next line is only a retry backstop.
+                await self._risk.update_daily_tracking(self._compute_total_equity())
+                await self._risk.persist_if_dirty()
                 await self._broadcast({"type": "swarm_summary", "data": self.get_swarm_summary()})
                 await asyncio.sleep(15)  # tick every 15s — adjust per strategy
 
@@ -223,10 +228,6 @@ class SwarmOrchestrator:
         snapshot = await self._repository.load_risk_state()
         if snapshot is not None:
             self._risk.restore_state(snapshot)
-
-    async def _persist_risk_state_if_dirty(self) -> None:
-        if self._repository and self._risk.consume_dirty():
-            self._fire_and_forget(self._repository.save_risk_state(self._risk.snapshot_state()))
 
     def _compute_total_equity(self) -> float:
         """Realized (sum of agent.equity) + floating (mark-to-market) — same

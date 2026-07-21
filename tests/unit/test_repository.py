@@ -142,7 +142,12 @@ async def test_load_risk_state_returns_none_when_nothing_persisted_yet(repo):
 
 
 @pytest.mark.asyncio
-async def test_save_risk_state_does_not_raise_on_db_error():
+async def test_save_risk_state_raises_on_db_error():
+    """Unlike every fail-soft write method in this class, save_risk_state
+    must raise — RiskEngine._persist_now() (see risk_engine.py) awaits this
+    immediately on every halt/resume transition and depends on detecting a
+    failed write to know a critical halt isn't durable yet (see ADR-0010
+    §Persistencia inmediata)."""
     bad_repo = AsyncRepository("sqlite+aiosqlite:////this/path/does/not/exist/at/all.db")
     snapshot = RiskStateSnapshot(
         daily_reference_equity=None,
@@ -155,7 +160,8 @@ async def test_save_risk_state_does_not_raise_on_db_error():
         halted_at=None,
         halt_observed_value=None,
     )
-    await bad_repo.save_risk_state(snapshot)  # must not raise
+    with pytest.raises((SQLAlchemyError, OSError)):
+        await bad_repo.save_risk_state(snapshot)
     await bad_repo.close()
 
 

@@ -257,34 +257,42 @@ class AsyncRepository:
             return []
 
     async def save_risk_state(self, snapshot: RiskStateSnapshot) -> None:
-        try:
-            values = {
-                "id": _RISK_STATE_ID,
-                "daily_reference_equity": snapshot.daily_reference_equity,
-                "daily_reference_date": snapshot.daily_reference_date,
-                "daily_halted": snapshot.daily_halted,
-                "daily_halted_at": snapshot.daily_halted_at,
-                "daily_halt_observed_value": snapshot.daily_halt_observed_value,
-                "sticky_halted": snapshot.sticky_halted,
-                "halt_cause": snapshot.halt_cause,
-                "halted_at": snapshot.halted_at,
-                "halt_observed_value": snapshot.halt_observed_value,
-            }
-            insert = postgresql.insert if self._engine.dialect.name == "postgresql" else sqlite.insert
-            update_cols = {k: v for k, v in values.items() if k != "id"}
-            stmt = (
-                insert(RiskStateORM)
-                .values(**values)
-                .on_conflict_do_update(  # type: ignore[attr-defined]
-                    index_elements=["id"],
-                    set_=update_cols,
-                )
+        """Unlike every fail-soft write method in this class, this one is
+        intentionally NOT fail-soft — it raises on failure instead of
+        logging a warning and moving on. RiskEngine._persist_now() (see
+        risk/engine/risk_engine.py) awaits this immediately at the moment a
+        halt/resume transition happens and depends on being able to detect
+        a failed write: on an exception it logs critically and leaves its
+        dirty flag set for SwarmOrchestrator's per-tick persist_if_dirty()
+        retry, rather than wrongly believing a critical halt is durable
+        when it silently isn't (see ADR-0010 §Persistencia inmediata —
+        same reasoning load_risk_state's docstring already documented for
+        reads)."""
+        values = {
+            "id": _RISK_STATE_ID,
+            "daily_reference_equity": snapshot.daily_reference_equity,
+            "daily_reference_date": snapshot.daily_reference_date,
+            "daily_halted": snapshot.daily_halted,
+            "daily_halted_at": snapshot.daily_halted_at,
+            "daily_halt_observed_value": snapshot.daily_halt_observed_value,
+            "sticky_halted": snapshot.sticky_halted,
+            "halt_cause": snapshot.halt_cause,
+            "halted_at": snapshot.halted_at,
+            "halt_observed_value": snapshot.halt_observed_value,
+        }
+        insert = postgresql.insert if self._engine.dialect.name == "postgresql" else sqlite.insert
+        update_cols = {k: v for k, v in values.items() if k != "id"}
+        stmt = (
+            insert(RiskStateORM)
+            .values(**values)
+            .on_conflict_do_update(  # type: ignore[attr-defined]
+                index_elements=["id"],
+                set_=update_cols,
             )
-            async with self._session_factory() as session:
-                await session.execute(stmt)
-                await session.commit()
-        except Exception as exc:
-            logger.warning(f"[Repository] save_risk_state failed: {exc}")
+        )
+        async with self._session_factory() as session:
+            await session.execute(stmt)
+            await session.commit()
 
     async def load_risk_state(self) -> RiskStateSnapshot | None:
         """Unlike every other read method in this class, this one is

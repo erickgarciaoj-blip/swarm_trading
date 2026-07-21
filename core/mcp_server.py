@@ -88,11 +88,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         )
     elif name == "halt_swarm":
         if orch:
-            orch._risk.halt(arguments.get("reason", "mcp_halt"))
+            await orch._risk.halt(arguments.get("reason", "mcp_halt"))
         data = {"halted": True}
     elif name == "resume_swarm":
         if orch:
-            orch._risk.resume()
+            await orch._risk.resume()
         data = {"halted": False}
     elif name == "pause_agent_type":
         from swarm_trading.core.models import AgentType
