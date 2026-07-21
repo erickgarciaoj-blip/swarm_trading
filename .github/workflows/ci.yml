@@ -49,6 +49,19 @@ jobs:
       - name: mypy
         working-directory: swarm_trading
         run: PYTHONPATH="$GITHUB_WORKSPACE" mypy --config-file pyproject.toml .
+      - name: mypy pre-commit hook worktree portability
+        # Validates scripts/run_mypy_precommit.sh (wired into
+        # .pre-commit-config.yaml) from a hostile-named git worktree, not
+        # just the direct mypy invocation above. The script expects the main
+        # checkout's mypy at .venv/bin/mypy (never a per-worktree venv, see
+        # its own comments) — CI installs mypy straight into the runner's
+        # Python instead of a .venv, so this symlinks it into the expected
+        # spot without a redundant second install.
+        working-directory: swarm_trading
+        run: |
+          mkdir -p .venv/bin
+          ln -s "$(command -v mypy)" .venv/bin/mypy
+          scripts/test_precommit_worktree_portability.sh
 
   test:
     runs-on: ubuntu-latest
