@@ -80,6 +80,11 @@ systemctl is-active fail2ban:
 - [ ] Docker Engine instalado desde el repositorio oficial (no `docker.io` del SO).
 - [ ] `docker compose version` funciona.
 
+## Python 3
+
+- [ ] `command -v python3` confirma que el binario existe en el host.
+- [ ] `python3 --version` cumple el mínimo soportado (3.9) — prerrequisito directo de `ci-deploy-entrypoint.sh` (PR 2).
+
 ## Usuario técnico `swarm-deploy`
 
 - [ ] Cuenta creada, sin contraseña utilizable (`passwd -l`).
@@ -96,7 +101,7 @@ systemctl is-active fail2ban:
 - [ ] `/etc/sudoers.d/swarm-deploy-admins` creado con `visudo -f` (nunca editado directamente).
 - [ ] Reglas limitadas exactamente a `deploy.sh` y `rollback.sh`, sin `NOPASSWD`.
 - [ ] Cada admin tiene su propia contraseña local, distinta, usada solo para `sudo` (nunca para login SSH).
-- [ ] `visudo -cf /etc/sudoers.d/swarm-deploy-admins` corrido como verificación independiente (sección 21 del runbook), sin errores.
+- [ ] `visudo -cf /etc/sudoers.d/swarm-deploy-admins` corrido como verificación independiente (sección 22 del runbook), sin errores.
 
 **Evidencia** — salida real:
 ```
@@ -111,8 +116,9 @@ ssh <admin2>@<VPS_IP> "sudo -l" →
 ## Estructura y datos
 
 - [ ] `/opt/swarm-trading/{releases,shared,backups,logs,scripts}` creada, propiedad de `swarm-deploy`.
-- [ ] `shared/.env` creado con los valores reales de staging, `chmod 600`.
+- [ ] `shared/.env` creado con los valores reales de staging, `chmod 600`, propiedad de `swarm-deploy`.
 - [ ] Confirmado que `shared/.env` **no** está en ningún repositorio git.
+- [ ] Confirmado (tras el primer deploy, paso 19) que `releases/<sha>/.env` quedó como symlink relativo a `../../shared/.env` — no como copia — creado por `ci-deploy-entrypoint.sh`, nunca a mano.
 - [ ] Login persistente a GHCR realizado como `swarm-deploy` con `docker login` interactivo (nunca `echo <token> | docker login --password-stdin`).
 - [ ] `~swarm-deploy/.docker/config.json` con `chmod 600` aplicado explícitamente, no solo verificado.
 
@@ -130,12 +136,12 @@ stat -c '%a' /home/swarm-deploy/.docker/config.json:
 
 ## Verificación final
 
-- [ ] Todos los comandos de la sección 21 del runbook corridos y en el estado esperado.
+- [ ] Todos los comandos de la sección 22 del runbook corridos y en el estado esperado.
 - [ ] Este checklist devuelto, con los campos de "Datos del VPS" completos, como evidencia de bootstrap terminado.
 
 ## Pendiente explícito hasta PR 2/3/4
 
-- [ ] Primer deploy manual (paso 18 del runbook) — requiere `deploy.sh`/`rollback.sh` (PR 2) y una imagen publicada en GHCR (PR 3).
+- [ ] Primer deploy manual (paso 19 del runbook) — requiere `deploy.sh`/`rollback.sh` (PR 2) y una imagen publicada en GHCR (PR 3).
 - [ ] Prueba de conexión real con la clave de CI — requiere `ci-deploy-entrypoint.sh` instalado (PR 2) y el job de deploy en el workflow (PR 4).
 
 No se espera que estas dos últimas casillas estén marcadas al entregar este checklist — el bootstrap del VPS (este PR) puede darse por completo sin ellas.
