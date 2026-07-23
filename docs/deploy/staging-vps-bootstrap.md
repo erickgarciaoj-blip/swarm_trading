@@ -4,7 +4,7 @@ Procedimiento único, ejecutado a mano por el operador del VPS. No está automat
 
 Ver [ADR-0011](../architecture/adr/0011-vps-staging-deployment.md) para el porqué de cada decisión de diseño referenciada aquí. Este documento es el "cómo", no el "por qué".
 
-**Alcance de este PR:** este runbook deja el VPS listo para recibir despliegues, pero por sí solo **no produce un pipeline de deploy funcional** — `scripts/ci-deploy-entrypoint.sh`, `deploy.sh` y `rollback.sh` llegan en el PR 2, la imagen publicada en GHCR en el PR 3, y la conexión real por SSH desde GitHub Actions en el PR 4. Los pasos que dependen de eso (11, 17, 18) quedan marcados explícitamente como pendientes hasta entonces.
+**Alcance de este PR:** este runbook deja el VPS listo para recibir despliegues, pero por sí solo **no produce un pipeline de deploy funcional** — `scripts/ci-deploy-entrypoint.sh`, `deploy.sh` y `rollback.sh` llegan en el PR 2, la imagen publicada en GHCR en el PR 3, y la conexión real por SSH desde GitHub Actions en el PR 4. Los pasos que dependen de eso (12, 18, 19) quedan marcados explícitamente como pendientes hasta entonces.
 
 ## Convenciones de este documento
 
@@ -20,7 +20,7 @@ Reúne esto antes de tocar nada:
 - Acceso actual al VPS (usuario y método — root con contraseña del proveedor, root con una clave ya puesta, o ya existe un usuario con `sudo`).
 - Si el proveedor ofrece una consola web/VNC/modo rescate fuera de banda — es tu plan de emergencia si algo del hardening de SSH sale mal. Confírmalo y anota cómo se accede a ella *antes* de empezar, no cuando ya la necesites.
 - Nombre de usuario y clave pública SSH de cada uno de los dos administradores (cada persona genera su propio par en su máquina — ver paso 2 — la privada nunca se comparte ni se envía a nadie).
-- Un token de GitHub con alcance `read:packages` para el login a GHCR (paso 16) — se genera desde GitHub, no antes de necesitarlo.
+- Un token de GitHub con alcance `read:packages` para el login a GHCR (paso 17) — se genera desde GitHub, no antes de necesitarlo.
 
 ## 1. Snapshot de seguridad antes de tocar nada
 
@@ -78,7 +78,7 @@ ssh <admin1_user>@<VPS_IP>
 exit
 ```
 
-Repite para `<admin2_user>`. Ambos deben poder entrar por clave — esto solo confirma el login SSH. `sudo` todavía no tiene nada que verificar aquí: las contraseñas de cada admin se configuran recién en el paso 13 y las reglas de `sudoers` en el paso 12 — ambas se verifican juntas al final, en la sección 21. Si el login por clave falla para cualquiera de los dos, corrige antes de continuar — la sesión root original sigue siendo tu red de seguridad.
+Repite para `<admin2_user>`. Ambos deben poder entrar por clave — esto solo confirma el login SSH. `sudo` todavía no tiene nada que verificar aquí: las contraseñas de cada admin se configuran recién en el paso 14 y las reglas de `sudoers` en el paso 13 — ambas se verifican juntas al final, en la sección 22. Si el login por clave falla para cualquiera de los dos, corrige antes de continuar — la sesión root original sigue siendo tu red de seguridad.
 
 ## 5. Endurecer SSH
 
@@ -90,7 +90,7 @@ PasswordAuthentication no
 AllowUsers <admin1_user> <admin2_user> swarm-deploy
 ```
 
-(`swarm-deploy` se crea en el paso 10 — puedes añadirlo a `AllowUsers` ahora aunque la cuenta todavía no exista, o volver a este archivo después.)
+(`swarm-deploy` se crea en el paso 11 — puedes añadirlo a `AllowUsers` ahora aunque la cuenta todavía no exista, o volver a este archivo después.)
 
 Valida la sintaxis **antes** de aplicar nada:
 
@@ -148,7 +148,7 @@ ufw enable
 ssh <admin1_user>@<VPS_IP>   # debe seguir funcionando
 ```
 
-Si el acceso falla, todavía tienes la sesión original abierta para revertir (`ufw disable`) o seguir el procedimiento de recuperación de la sección 20.
+Si el acceso falla, todavía tienes la sesión original abierta para revertir (`ufw disable`) o seguir el procedimiento de recuperación de la sección 21.
 
 Si tu proveedor ofrece un firewall de red (Hetzner Cloud Firewall, DigitalOcean Cloud Firewalls, security groups de AWS, etc.), configúralo también como segunda capa — no dependas solo de `ufw`.
 
@@ -181,7 +181,26 @@ docker --version
 docker compose version
 ```
 
-## 10. Crear `swarm-deploy` — sin login humano
+## 10. Verificar Python 3
+
+`ci-deploy-entrypoint.sh` (PR 2 de esta fase) delega la inspección estructural del bundle recibido por SSH a `python3` (módulo `tarfile` de la librería estándar — ver el propio script) en vez de parsear la salida de `tar` por columnas. Es una dependencia real del host, no solo del entorno de desarrollo: sin `python3` en el `PATH` de `swarm-deploy`, todo intento de deploy falla en el momento de la inspección del bundle, antes de tocar nada.
+
+La mayoría de las distros Debian/Ubuntu recientes ya traen Python 3 preinstalado, pero no lo asumas — verifícalo explícitamente:
+
+```bash
+command -v python3 || { echo "python3 no encontrado — instalar antes de continuar"; exit 1; }
+python3 --version
+```
+
+Versión mínima soportada: **3.9** (usa sintaxis de type hints — `set[str]`, `dict`, etc. — disponible desde 3.9; no depende de nada más reciente). Si `python3 --version` reporta menos que eso, o el comando no existe:
+
+```bash
+apt-get update && apt-get install -y python3
+```
+
+Vuelve a correr `python3 --version` después de instalar y confirma que cumple el mínimo antes de seguir al siguiente paso. No continúes el bootstrap con esta verificación en rojo — es un prerrequisito directo de `ci-deploy-entrypoint.sh` (paso 12), y fallar temprano aquí es preferible a descubrirlo en el primer intento de deploy real.
+
+## 11. Crear `swarm-deploy` — sin login humano
 
 ```bash
 useradd --create-home --shell /bin/bash swarm-deploy
@@ -191,9 +210,9 @@ mkdir -p /home/swarm-deploy/.ssh && chmod 700 /home/swarm-deploy/.ssh
 chown -R swarm-deploy:swarm-deploy /home/swarm-deploy/.ssh
 ```
 
-`swarm-deploy` queda en el grupo `docker` — en la práctica, equivalente a acceso root (puede montar `/` dentro de un contenedor). Es un trade-off aceptado y documentado en el [ADR-0011](../architecture/adr/0011-vps-staging-deployment.md), no un descuido — la mitigación real está en que ningún humano tiene la clave de esta cuenta y en las restricciones del paso 11.
+`swarm-deploy` queda en el grupo `docker` — en la práctica, equivalente a acceso root (puede montar `/` dentro de un contenedor). Es un trade-off aceptado y documentado en el [ADR-0011](../architecture/adr/0011-vps-staging-deployment.md), no un descuido — la mitigación real está en que ningún humano tiene la clave de esta cuenta y en las restricciones del paso 12.
 
-## 11. Clave SSH de `swarm-deploy` — generada fuera del VPS
+## 12. Clave SSH de `swarm-deploy` — generada fuera del VPS
 
 **Genera este par en tu propia máquina (la del operador haciendo el bootstrap), nunca en el VPS**, para que la privada no toque el disco del servidor en ningún momento:
 
@@ -231,7 +250,7 @@ ssh-keyscan -t ed25519 <VPS_IP>
 
 El resultado va al secret `STAGING_SSH_KNOWN_HOSTS` (mismo Environment).
 
-## 12. `sudo` acotado para los dos admins
+## 13. `sudo` acotado para los dos admins
 
 ```bash
 visudo -f /etc/sudoers.d/swarm-deploy-admins
@@ -244,18 +263,18 @@ Contenido:
 <admin2_user> ALL=(swarm-deploy) /opt/swarm-trading/scripts/deploy.sh, /opt/swarm-trading/scripts/rollback.sh
 ```
 
-Sin `NOPASSWD` — cada admin debe escribir su propia contraseña local (paso 13) para elevar a `swarm-deploy`, incluso para estos dos comandos concretos. Es una confirmación deliberada extra antes de tocar el sistema real.
+Sin `NOPASSWD` — cada admin debe escribir su propia contraseña local (paso 14) para elevar a `swarm-deploy`, incluso para estos dos comandos concretos. Es una confirmación deliberada extra antes de tocar el sistema real.
 
-## 13. Contraseñas locales — solo para `sudo`, nunca para SSH
+## 14. Contraseñas locales — solo para `sudo`, nunca para SSH
 
 ```bash
 passwd <admin1_user>
 passwd <admin2_user>
 ```
 
-Cada uno la define para sí mismo, en el momento, sin compartirla con nadie más (ni siquiera contigo). El login SSH sigue siendo exclusivamente por clave (`PasswordAuthentication no`, paso 5) — estas contraseñas solo sirven para la elevación de `sudo` del paso 12.
+Cada uno la define para sí mismo, en el momento, sin compartirla con nadie más (ni siquiera contigo). El login SSH sigue siendo exclusivamente por clave (`PasswordAuthentication no`, paso 5) — estas contraseñas solo sirven para la elevación de `sudo` del paso 13.
 
-## 14. Estructura de directorios
+## 15. Estructura de directorios
 
 ```bash
 mkdir -p /opt/swarm-trading/{releases,shared,backups,logs,scripts}
@@ -263,7 +282,7 @@ chown -R swarm-deploy:swarm-deploy /opt/swarm-trading
 chmod 750 /opt/swarm-trading
 ```
 
-## 15. `shared/.env` — creación segura
+## 16. `shared/.env` — creación segura
 
 ```bash
 su - swarm-deploy
@@ -275,9 +294,11 @@ chmod 600 /opt/swarm-trading/shared/.env
 exit
 ```
 
-Este archivo **nunca** se genera ni se toca desde CI/CD — vive solo aquí, se crea una vez, se edita a mano cuando haga falta. Ningún workflow de GitHub lo lee ni lo transfiere.
+Este archivo **nunca** se genera ni se toca desde CI/CD — vive solo aquí, se crea una vez, se edita a mano cuando haga falta. Ningún workflow de GitHub lo lee ni lo transfiere. Ningún bundle puede transportar un `.env` tampoco: `scripts/ci-deploy-entrypoint.sh` rechaza cualquier archivo fuera de su allowlist explícita (PR 2 de esta fase).
 
-## 16. Login persistente a GHCR
+En cada deploy, `ci-deploy-entrypoint.sh` enlaza automáticamente `releases/<sha>/.env -> ../../shared/.env` — nunca copia el contenido — después de validar, en este orden, que `shared/.env` existe, que es un archivo regular (no un symlink), que no es legible por otros (`chmod 600`, como en el comando de arriba) y que pertenece al mismo usuario que corre el entrypoint (`swarm-deploy`). Si cualquiera de esas validaciones falla, el deploy se aborta ahí mismo — antes de tocar backup, migración o cualquier contenedor. Por eso los permisos `600` de este paso no son solo buena práctica: si se relajan (por ejemplo con un `chmod 644` accidental), el siguiente deploy se rechaza en vez de arrancar con un archivo de secretos legible por cualquiera.
+
+## 17. Login persistente a GHCR
 
 Con el token `read:packages` que generaste en GitHub (Settings → Developer settings → Personal access tokens):
 
@@ -298,9 +319,9 @@ exit
 
 Este login es **una sola vez**, aquí, en el bootstrap — el `GHCR_READ_TOKEN` nunca viaja por GitHub Actions en cada deploy.
 
-## 17. Backups — preparación
+## 18. Backups — preparación
 
-Confirma que `pg_dump` funciona contra el stack real antes de depender de él (requiere que `docker-compose.yml` y `.env` ya estén desplegados — si todavía no hay ningún release, vuelve a este paso después del primer deploy manual, punto 18):
+Confirma que `pg_dump` funciona contra el stack real antes de depender de él (requiere que `docker-compose.yml` y `.env` ya estén desplegados — si todavía no hay ningún release, vuelve a este paso después del primer deploy manual, punto 19):
 
 ```bash
 cd /opt/swarm-trading/releases/<sha>/
@@ -311,7 +332,7 @@ gzip -t /opt/swarm-trading/backups/test_*.sql.gz && echo OK
 
 Retención acordada: últimos 14 backups (la poda la maneja `deploy.sh`, PR 2 — por ahora, si el directorio crece, revisa a mano).
 
-## 18. Primer deploy manual — antes de automatizar nada
+## 19. Primer deploy manual — antes de automatizar nada
 
 Este paso **depende de que los PR 2 (scripts) y al menos una imagen publicada por PR 3 estén disponibles**. No se puede completar solo con este PR 1. Cuando ambos estén listos:
 
@@ -320,7 +341,7 @@ Este paso **depende de que los PR 2 (scripts) y al menos una imagen publicada po
 3. Confirma `current -> releases/<sha>/` y que `curl -sf http://127.0.0.1:8000/health/ready` responde `{"status": "ok"}`.
 4. Solo después de que esto funcione a mano, se prueba el camino por SSH con la clave de CI (PR 4).
 
-## 19. Rollback manual
+## 20. Rollback manual
 
 ```bash
 sudo -u swarm-deploy /opt/swarm-trading/scripts/rollback.sh <sha_al_que_volver>
@@ -328,7 +349,7 @@ sudo -u swarm-deploy /opt/swarm-trading/scripts/rollback.sh <sha_al_que_volver>
 
 El SHA objetivo es siempre explícito — el script nunca infiere "el anterior" por su cuenta, para que quede claro en el log a qué versión exacta se volvió y quién lo pidió.
 
-## 20. Procedimiento de recuperación
+## 21. Procedimiento de recuperación
 
 Si en algún punto del hardening de SSH (paso 5) o del firewall (paso 6) quedas sin acceso:
 
@@ -338,7 +359,7 @@ Si en algún punto del hardening de SSH (paso 5) o del firewall (paso 6) quedas 
 2. Si no queda ninguna sesión abierta, usa la consola de rescate/VNC del proveedor (la que confirmaste en el paso 0) — entra sin pasar por `sshd` en absoluto y corrige `sshd_config` o corre `ufw disable` manualmente desde ahí.
 3. Nunca reinicies el droplet/instancia esperando que "se arregle solo" — ni un `sshd_config` roto ni un `ufw` mal configurado se arreglan con un reinicio; usa la consola de rescate primero.
 
-## 21. Verificación final — checklist técnico
+## 22. Verificación final — checklist técnico
 
 ```bash
 ssh root@<VPS_IP>                                    # debe fallar

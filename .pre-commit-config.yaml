@@ -19,6 +19,16 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        # Fase 4.6 (PR 2/4) — scripts de deployment de staging. Lista
+        # explícita, no todo scripts/*.sh: install_macos.sh/setup.sh (Fase 2)
+        # tienen hallazgos propios (SC1091) fuera del alcance de este PR.
+        # También corre como gate real en CI (job "lint") — ver ci.yml.
+        files: ^scripts/(ci-deploy-entrypoint|ci-deploy-integration-lib|deploy|rollback|test_ci_deploy_entrypoint_rejects_invalid_input|test_ci_deploy_entrypoint_shared_env|test_deploy_and_rollback_scripts)\.sh$
+
   - repo: local
     hooks:
       - id: mypy

@@ -33,6 +33,41 @@ jobs:
         run: cd swarm_trading && ruff check .
       - name: ruff format --check
         run: cd swarm_trading && ruff format --check .
+      - name: shellcheck (deploy scripts, Fase 4.6)
+        # ubuntu-latest ships shellcheck preinstalled — no install step.
+        # Gate real en CI, no solo en pre-commit (Fase 4.6, PR 2/4). Lista
+        # explícita, no scripts/*.sh — install_macos.sh/setup.sh (Fase 2,
+        # ajenos a este PR) tienen hallazgos propios (SC1091) que no es
+        # alcance de este PR corregir; ampliar el gate a todo scripts/ queda
+        # para un PR futuro que decida abordarlos.
+        run: |
+          cd swarm_trading
+          shellcheck \
+            scripts/ci-deploy-entrypoint.sh \
+            scripts/ci-deploy-integration-lib.sh \
+            scripts/deploy.sh \
+            scripts/rollback.sh \
+            scripts/test_ci_deploy_entrypoint_rejects_invalid_input.sh \
+            scripts/test_ci_deploy_entrypoint_shared_env.sh \
+            scripts/test_deploy_and_rollback_scripts.sh
+
+      - name: entrypoint bundle validation tests (no Docker, Fase 4.6)
+        # Antes solo se pasaban por shellcheck, nunca se ejecutaban en CI —
+        # cerrado junto con el gap de shared/.env: "agregar pruebas" implica
+        # que corran, no solo que analicen sintaxis limpia.
+        run: |
+          cd swarm_trading
+          bash scripts/test_ci_deploy_entrypoint_rejects_invalid_input.sh
+
+      - name: entrypoint shared/.env validation tests (no Docker, Fase 4.6)
+        run: |
+          cd swarm_trading
+          bash scripts/test_ci_deploy_entrypoint_shared_env.sh
+
+      - name: deploy/rollback direct tests (no Docker, Fase 4.6)
+        run: |
+          cd swarm_trading
+          bash scripts/test_deploy_and_rollback_scripts.sh
 
   typecheck:
     runs-on: ubuntu-latest
@@ -338,3 +373,359 @@ jobs:
       - name: Tear down the primary stack
         if: always()
         run: docker compose --profile proxy down -v
+
+  deploy-scripts-docker-integration:
+    # Fase 4.6 (PR 2/4, cierre de validaciones) — integración REAL con
+    # Docker/Compose para scripts/{deploy,rollback,ci-deploy-entrypoint}.sh.
+    # A diferencia de test_deploy_and_rollback_scripts.sh (sin Docker) y de
+    # test_ci_deploy_entrypoint_rejects_invalid_input.sh (Docker simulado con
+    # un binario `docker` falso), este job corre los tres scripts reales
+    # contra Docker/Compose reales — backup, migración, health checks,
+    # rollback automático y manual, flock concurrente, digest/label OCI, todo
+    # de punta a punta, sin mocks. Job aislado a propósito, separado de
+    # docker-stack-integration (que valida docker-compose.yml de desarrollo,
+    # no el pipeline de deploy de staging) — reutiliza el mismo patrón
+    # general (levantar Compose real, verificar con curl/docker inspect,
+    # limpiar siempre al final) pero sobre docker-compose.staging.yml y los
+    # tres scripts de esta fase.
+    #
+    # Nunca se conecta al VPS real ni a GHCR real: las imágenes de prueba se
+    # construyen y etiquetan localmente con el nombre que IMAGE_REPO espera
+    # (ghcr.io/erickgarciaoj-blip/swarm_trading) — un tag puramente local,
+    # nunca empujado ahí — y el digest real que exige ADR-0011 se obtiene de
+    # un registry Docker local efímero (localhost:5000), nunca de ghcr.io.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: swarm_trading
+    env:
+      # SHAs sintéticos (40 hex minúsculas) — uno por escenario, para que los
+      # logs y los mensajes de error de cada script identifiquen sin ambigüedad
+      # a qué caso de prueba pertenecen.
+      SHA_A: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" # primer deploy, vía el entrypoint real
+      SHA_B: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2" # segundo deploy directo + redeploy + rollback target
+      SHA_C: "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" # variante "swarm" con DATABASE_URL inalcanzable (health check falla)
+      SHA_D: "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4" # variante "migrate" que falla a propósito
+      SHA_E: "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5" # deploy usado para el escenario de fallo de backup
+      SHA_F: "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6" # segundo deploy en el escenario de flock concurrente
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: swarm_trading
+
+      - name: Resolve SWARM_ROOT
+        # El contexto `runner` (y por tanto `${{ runner.temp }}`) no está
+        # disponible en el `env:` a nivel de job (ver
+        # https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability)
+        # — se resuelve aquí, en un step real, a partir de $RUNNER_TEMP (la
+        # variable de entorno, siempre disponible dentro de cualquier
+        # `run:`) y se propaga al resto del job vía $GITHUB_ENV.
+        run: echo "SWARM_ROOT=$RUNNER_TEMP/swarm-deploy-root" >> "$GITHUB_ENV"
+
+      - name: Local Docker registry (never ghcr.io, never the VPS)
+        run: |
+          docker run -d --name local-registry -p 5000:5000 registry:2
+          for _ in $(seq 1 20); do
+            curl -sf http://127.0.0.1:5000/v2/ >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:5000/v2/ >/dev/null
+
+      - name: Build the shared application image once (real Dockerfile, reused per-SHA via `docker commit`)
+        run: docker build -t swarm_test_base:ci .
+
+      - name: Write .env fixture used by every scenario below
+        # La lógica compartida (dc, build_release_image, prepare_release_dir,
+        # setup_shared_env, assert_*) vive en scripts/ci-deploy-integration-lib.sh
+        # — un archivo versionado, no un heredoc embebido aquí — para que
+        # quede bajo ShellCheck/pre-commit como cualquier otro script y sea
+        # diffable normalmente. Cada step de este job la trae con
+        # `source scripts/ci-deploy-integration-lib.sh`.
+        run: |
+          # Doble uso, a propósito: (a) fuente de contenido para el único
+          # shared/.env real (setup_shared_env, más abajo — cada release lo
+          # consume por symlink, nunca por copia) y (b) --env-file de este
+          # job para sus propios comandos `dc ...` ad hoc (postgres exec,
+          # ps, config) — ambos deben coincidir porque son, en la práctica,
+          # el mismo archivo una vez que el symlink existe.
+          cat > .ci-env-fixture <<'ENVEOF'
+          APP_ENV=development
+          POSTGRES_DB=swarm_trading_ci_deploy
+          POSTGRES_USER=swarm
+          POSTGRES_PASSWORD=swarm_ci_deploy_password
+          DATABASE_URL=postgresql+asyncpg://swarm:swarm_ci_deploy_password@postgres:5432/swarm_trading_ci_deploy
+          REDIS_URL=redis://redis:6379/0
+          ENVEOF
+
+          # docker-compose.staging.yml declara `env_file: - .env` en cada
+          # servicio — Compose exige que ese archivo exista relativo al
+          # directorio del propio -f, incluso para subcomandos de solo
+          # lectura (ps/exec/logs), sin importar que dc() nunca cree ni
+          # recree migrate/swarm de verdad (eso lo hacen únicamente
+          # deploy.sh/rollback.sh/el entrypoint, con la copia de ESE release
+          # bajo $SWARM_ROOT/releases/<sha>/.env). dc() apunta al
+          # docker-compose.staging.yml de este checkout (no al de ninguna
+          # release), así que necesita su propio ".env" aquí — mismo
+          # contenido, sin ninguna implicación de seguridad (nunca se usa
+          # para desplegar nada real).
+          cp .ci-env-fixture .env
+
+          # Variante "swarm" con DATABASE_URL apuntando a un host que no
+          # existe en la red de Compose — deja migrate (que sigue apuntando
+          # a "postgres" real) sano, y /health (liveness) sano, pero
+          # /health/ready (requiere Postgres alcanzable) siempre en 503: el
+          # health check real de deploy.sh/rollback.sh, no un mock.
+          awk '/^  swarm:/{f=1} f && /@postgres:5432/{gsub(/@postgres:5432/, "@postgres-unreachable:5432")} {print}' \
+              docker-compose.staging.yml > docker-compose.staging.broken-health.yml
+
+          # Variante "migrate" que falla a propósito — deploy.sh debe
+          # abortar sin tocar jamás al servicio "swarm" ya corriendo.
+          sed 's#entrypoint: \["alembic", "upgrade", "head"\]#entrypoint: ["sh", "-c", "echo CI-INTENTIONAL-MIGRATION-FAILURE >\&2; exit 1"]#' \
+              docker-compose.staging.yml > docker-compose.staging.broken-migrate.yml
+          grep -q "CI-INTENTIONAL-MIGRATION-FAILURE" docker-compose.staging.broken-migrate.yml
+
+      - name: Build per-SHA images (real OCI label baked in, real digest via the local registry)
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          {
+            echo "DIGEST_A=$(build_release_image "$SHA_A")"
+            echo "DIGEST_B=$(build_release_image "$SHA_B")"
+            echo "DIGEST_C=$(build_release_image "$SHA_C")"
+            echo "DIGEST_D=$(build_release_image "$SHA_D")"
+            echo "DIGEST_E=$(build_release_image "$SHA_E")"
+            echo "DIGEST_F=$(build_release_image "$SHA_F")"
+          } >> "$GITHUB_ENV"
+
+      - name: "Prepare shared/.env and releases/ for the SHAs deployed directly (bypassing the entrypoint on purpose)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          setup_shared_env
+          # SHA_A NO se pre-siembra aquí — pasa por ci-deploy-entrypoint.sh
+          # real más abajo, que crea y valida su propio symlink hacia
+          # shared/.env (paso 4 del entrypoint) sobre una extracción
+          # PROMOTED limpia, sin necesitar ningún atajo.
+          prepare_release_dir "$SHA_B" docker-compose.staging.yml "$DIGEST_B"
+          prepare_release_dir "$SHA_C" docker-compose.staging.broken-health.yml "$DIGEST_C"
+          prepare_release_dir "$SHA_D" docker-compose.staging.broken-migrate.yml "$DIGEST_D"
+          prepare_release_dir "$SHA_E" docker-compose.staging.yml "$DIGEST_E"
+          prepare_release_dir "$SHA_F" docker-compose.staging.yml "$DIGEST_F"
+          chmod +x scripts/deploy.sh scripts/rollback.sh scripts/ci-deploy-entrypoint.sh
+
+      - name: "Scenario: primer deploy con Postgres ya corriendo y con datos (via ci-deploy-entrypoint.sh real — digest real, label OCI, current no se mueve hasta health OK)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+
+          # Postgres arriba ANTES de que exista ningún release ni "current"
+          # — la condición exacta que hace que deploy.sh SÍ intente backup en
+          # lo que, por no existir "current" todavía, es igualmente el
+          # primer deploy.
+          dc up -d --wait postgres
+          dc exec -T postgres \
+              psql -U swarm -d swarm_trading_ci_deploy -c \
+              "CREATE TABLE ci_backup_marker (id serial primary key, note text); INSERT INTO ci_backup_marker (note) VALUES ('pre-existing-data');"
+          assert_eq "$(current_sha)" "<none>" "current no existe todavía (verdadero primer deploy)"
+
+          # SHA_A no fue pre-sembrada — esta es una extracción PROMOTED
+          # limpia. shared/.env ya existe (setup_shared_env, paso previo);
+          # el propio entrypoint valida sus permisos/propietario y crea
+          # releases/$SHA_A/.env -> ../../shared/.env por su cuenta (paso 4
+          # del entrypoint) — el bundle nunca transporta ".env" (fuera de la
+          # allowlist).
+          mkdir -p bundle_a/scripts
+          cp docker-compose.yml bundle_a/docker-compose.yml
+          cp docker-compose.staging.yml bundle_a/docker-compose.staging.yml
+          cp scripts/deploy.sh bundle_a/scripts/deploy.sh
+          cp scripts/rollback.sh bundle_a/scripts/rollback.sh
+          chmod +x bundle_a/scripts/deploy.sh bundle_a/scripts/rollback.sh
+          CHECKSUM="$(cat bundle_a/docker-compose.yml bundle_a/docker-compose.staging.yml bundle_a/scripts/deploy.sh bundle_a/scripts/rollback.sh | sha256sum | cut -d' ' -f1)"
+          {
+            echo "SHA=$SHA_A"
+            echo "ACTOR=ci-integration"
+            echo "BUNDLE_SHA256=$CHECKSUM"
+          } > bundle_a/MANIFEST
+          tar -C bundle_a -cf bundle_a.tar docker-compose.yml docker-compose.staging.yml scripts MANIFEST
+
+          SSH_ORIGINAL_COMMAND="deploy $SHA_A" bash scripts/ci-deploy-entrypoint.sh < bundle_a.tar
+
+          assert_eq "$(current_sha)" "$SHA_A" "deploy exitoso — current apunta a SHA_A"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "backup OK" "backup intentado y exitoso pese a ser 'primer deploy' (Postgres ya tenía datos)"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "migración OK" "migración corrió antes del cutover"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "deploy de $SHA_A exitoso" "deploy.sh reportó éxito"
+
+          # shared/.env: el entrypoint debe haber validado permisos/
+          # propietario y dejado el symlink exacto — antes de que cualquiera
+          # de las aserciones de arriba (backup/migración/exitoso) pudiera
+          # siquiera ocurrir, ya que el paso 4 corre antes que exec deploy.sh.
+          ENV_LINK_TARGET="$(readlink "$SWARM_ROOT/releases/$SHA_A/.env")"
+          assert_eq "$ENV_LINK_TARGET" "../../shared/.env" "releases/\$SHA_A/.env es un symlink exacto a ../../shared/.env"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "shared/.env validado" "el entrypoint registró la validación real de shared/.env"
+
+          # Label OCI coincidente + digest real, verificados por el propio
+          # entrypoint contra Docker real (no el `docker` falso de
+          # test_ci_deploy_entrypoint_rejects_invalid_input.sh).
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "label_ok=true" "entrypoint verificó el label OCI org.opencontainers.image.revision contra Docker real"
+          RESOLVED_DIGEST="$(cat "$SWARM_ROOT/releases/$SHA_A/.image-digest")"
+          assert_eq "$RESOLVED_DIGEST" "$DIGEST_A" "el digest que el entrypoint grabó es el mismo digest real resuelto vía el registry local"
+
+          # El digest pinneado es el que Compose realmente usó para levantar
+          # "swarm" — no un tag mutable.
+          RUNNING_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$(dc ps -q swarm)")"
+          EXPECTED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$DIGEST_A")"
+          assert_eq "$RUNNING_IMAGE_ID" "$EXPECTED_IMAGE_ID" "el contenedor 'swarm' corre exactamente la imagen del digest pinneado, no un tag mutable"
+
+          curl -sf http://127.0.0.1:8000/health/ready > /tmp/health-ready.json
+          assert_contains /tmp/health-ready.json '"status":"ok"' "/health/ready responde ok tras el deploy real"
+
+      - name: "Scenario: backup exitoso + redeploy del mismo SHA (deploy.sh directo, sin el entrypoint)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          dc exec -T postgres \
+              psql -U swarm -d swarm_trading_ci_deploy -c \
+              "INSERT INTO ci_backup_marker (note) VALUES ('before-sha-b');"
+
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_B" ci-integration
+          assert_eq "$(current_sha)" "$SHA_B" "deploy directo de SHA_B exitoso"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "backup OK" "backup real exitoso con Postgres ya corriendo y con datos"
+
+          # Redeploy del mismo SHA — debe volver a funcionar de punta a
+          # punta (backup de nuevo, migración de nuevo, sin cambios reales,
+          # cutover, health OK).
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_B" ci-integration
+          assert_eq "$(current_sha)" "$SHA_B" "redeploy del mismo SHA_B exitoso"
+
+      - name: "Scenario: fallo de backup aborta antes de migrar, servicio activo intacto (SHA_E)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          POSTGRES_CID="$(dc ps -q postgres)"
+          RUNNING_SWARM_BEFORE="$(dc ps -q swarm)"
+
+          # Rompe pg_dump DENTRO del propio contenedor postgres en marcha —
+          # el servidor sigue sano (pg_isready no lo toca), solo el binario
+          # que deploy.sh invoca vía `docker exec` falla.
+          docker exec "$POSTGRES_CID" sh -c 'mv /usr/bin/pg_dump /usr/bin/pg_dump.ci-real && printf "#!/bin/sh\nexit 1\n" > /usr/bin/pg_dump && chmod +x /usr/bin/pg_dump'
+
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_E" ci-integration
+          STATUS=$?
+          set -e
+
+          docker exec "$POSTGRES_CID" sh -c 'mv /usr/bin/pg_dump.ci-real /usr/bin/pg_dump'
+
+          [ "$STATUS" -ne 0 ] || { echo "FAIL: se esperaba que deploy.sh fallara con pg_dump roto"; exit 1; }
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "backup falló — deploy abortado antes de la migración, servicio activo intacto" \
+              "backup falló y el mensaje confirma que la migración nunca se invocó"
+          assert_eq "$(current_sha)" "$SHA_B" "current sigue en SHA_B — el deploy fallido de SHA_E nunca llegó al cutover"
+          assert_eq "$(dc ps -q swarm)" "$RUNNING_SWARM_BEFORE" "el contenedor 'swarm' (SHA_B) nunca se tocó"
+
+      - name: "Scenario: migración fallida — servicio anterior intacto (SHA_D)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          RUNNING_SWARM_BEFORE="$(dc ps -q swarm)"
+
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_D" ci-integration
+          STATUS=$?
+          set -e
+
+          [ "$STATUS" -ne 0 ] || { echo "FAIL: se esperaba que deploy.sh fallara con una migración rota"; exit 1; }
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "migración falló — abortando, el servicio activo no fue tocado" \
+              "migración falló con el mensaje esperado"
+          assert_eq "$(current_sha)" "$SHA_B" "current sigue en SHA_B tras el fallo de migración de SHA_D"
+          assert_eq "$(dc ps -q swarm)" "$RUNNING_SWARM_BEFORE" "el contenedor 'swarm' (SHA_B) nunca se tocó"
+          curl -sf -o /dev/null http://127.0.0.1:8000/health/ready
+
+      - name: "Scenario: health check fallido -> rollback automático a la imagen anterior (SHA_C)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_C" ci-integration
+          STATUS=$?
+          set -e
+
+          [ "$STATUS" -ne 0 ] || { echo "FAIL: se esperaba que deploy.sh terminara en 1 (rollback automático es éxito parcial, no éxito total)"; exit 1; }
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "health check falló tras el deploy" "el health check real de /health/ready detectó el fallo"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "rollback automático a $SHA_B exitoso, servicio restaurado" \
+              "rollback automático real a la imagen anterior, ejecutado por deploy.sh mismo"
+          assert_eq "$(current_sha)" "$SHA_B" "current volvió a SHA_B tras el rollback automático"
+          curl -sf -o /dev/null http://127.0.0.1:8000/health/ready
+
+      - name: "Scenario: rollback manual cuyo propio health check falla — sin recursión (SHA_C como destino)"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          START="$(date +%s)"
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/rollback.sh "$SHA_C" ci-integration
+          STATUS=$?
+          set -e
+          END="$(date +%s)"
+          ELAPSED=$((END - START))
+
+          [ "$STATUS" -ne 0 ] || { echo "FAIL: se esperaba que rollback.sh fallara (SHA_C nunca queda sano)"; exit 1; }
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "rollback a $SHA_C falló el health check tras levantar el stack" \
+              "rollback.sh detectó el fallo de health check real"
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "no se reintenta automáticamente" "rollback.sh no reintenta — confirma ausencia de recursión"
+          # Cota amplia (una sola pasada de HEALTH_CHECK_ATTEMPTS x
+          # HEALTH_CHECK_INTERVAL_SEC =~ 60s): si hubiera recursión, el
+          # tiempo real sería un múltiplo de esto, no una sola pasada.
+          [ "$ELAPSED" -lt 100 ] || { echo "FAIL: rollback.sh tardó ${ELAPSED}s — sugiere reintentos recursivos, no una sola pasada"; exit 1; }
+          echo "PASS: rollback.sh falló en una sola pasada (${ELAPSED}s), sin recursión"
+          assert_eq "$(current_sha)" "$SHA_B" "current nunca se movió — el rollback manual fallido no llegó al cutover"
+
+      - name: "Scenario: flock — dos ejecuciones concurrentes reales de deploy.sh"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+
+          # SHA_B en background (backup+migración+up+health real, toma
+          # varios segundos) mientras un segundo deploy.sh real compite por
+          # el mismo lockfile — no la simulación de flock en solitario que
+          # ya cubre test_deploy_and_rollback_scripts.sh, sino los dos
+          # scripts reales compitiendo.
+          (SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_B" ci-integration-bg > "$RUNNER_TEMP/bg-deploy.log" 2>&1) &
+          BG_PID=$!
+          sleep 1
+
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_F" ci-integration-fg > "$RUNNER_TEMP/fg-deploy.log" 2>&1
+          FG_STATUS=$?
+          set -e
+
+          wait "$BG_PID"
+          BG_STATUS=$?
+
+          [ "$FG_STATUS" -ne 0 ] || { echo "FAIL: el segundo deploy.sh debía rechazarse por el lock"; cat "$RUNNER_TEMP/fg-deploy.log"; exit 1; }
+          grep -qF "otro deploy o rollback está en curso" "$RUNNER_TEMP/fg-deploy.log" || \
+              { echo "FAIL: falta el mensaje de rechazo por lock"; cat "$RUNNER_TEMP/fg-deploy.log"; exit 1; }
+          echo "PASS: segundo deploy.sh (SHA_F) rechazado de inmediato por flock mientras el primero seguía corriendo"
+
+          [ "$BG_STATUS" -eq 0 ] || { echo "FAIL: el deploy en background (SHA_B) debía completar exitosamente"; cat "$RUNNER_TEMP/bg-deploy.log"; exit 1; }
+          echo "PASS: el deploy en background (SHA_B) completó una vez liberado el lock"
+          assert_eq "$(current_sha)" "$SHA_B" "current es SHA_B — el intento rechazado (SHA_F) nunca tocó nada"
+
+      - name: "Scenario: ningún servicio de docker-compose.staging.yml define build:"
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          if dc config | grep -q "build:"; then
+              echo "FAIL: se encontró una clave 'build:' en docker-compose.staging.yml resuelto — todas las releases deben desplegarse solo por imagen" >&2
+              exit 1
+          fi
+          echo "PASS: docker compose config resuelto no contiene ninguna clave 'build:' — todas las releases se despliegan solo por imagen"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          source scripts/ci-deploy-integration-lib.sh 2>/dev/null || true
+          echo "--- deploy.log ---"
+          cat "$SWARM_ROOT/logs/deploy.log" 2>/dev/null || echo "(sin deploy.log)"
+          echo "--- docker compose ps ---"
+          dc ps -a || true
+          echo "--- docker compose logs ---"
+          dc logs || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          source scripts/ci-deploy-integration-lib.sh 2>/dev/null || true
+          dc down -v --remove-orphans || true
+          docker rm -f local-registry || true
