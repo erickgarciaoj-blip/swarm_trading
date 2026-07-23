@@ -692,7 +692,8 @@ jobs:
 
       - name: "Scenario: ningún servicio de docker-compose.staging.yml define build:"
         run: |
-          if docker compose -f docker-compose.staging.yml --env-file .ci-env-fixture config | grep -q "build:"; then
+          source scripts/ci-deploy-integration-lib.sh
+          if dc config | grep -q "build:"; then
               echo "FAIL: se encontró una clave 'build:' en docker-compose.staging.yml resuelto — todas las releases deben desplegarse solo por imagen" >&2
               exit 1
           fi

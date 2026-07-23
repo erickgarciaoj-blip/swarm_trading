@@ -18,7 +18,17 @@ REGISTRY="localhost:5000"
 # sobre -p/-f/--env-file, igual que deploy.sh/rollback.sh, para que nunca
 # pueda caer silenciosamente en docker-compose.yml (el de dev, con
 # contextos build:) solo porque a alguna llamada se le olvidó una bandera.
+#
+# Compose interpola el archivo COMPLETO antes de ejecutar cualquier
+# subcomando (up/ps/exec/logs/down/config), incluidas las variables de
+# servicios que ni siquiera se están tocando — migrate/swarm exigen
+# DEPLOY_IMAGE_REF con `${DEPLOY_IMAGE_REF:?...}` (ver docker-compose.staging.yml).
+# dc() nunca se usa para desplegar migrate/swarm de verdad (eso solo lo
+# hacen deploy.sh/rollback.sh reales, con su propio valor correcto ya
+# exportado) — un valor de relleno aquí es inofensivo porque ningún
+# subcomando que este wrapper invoca crea o recrea esos dos servicios.
 dc() {
+    DEPLOY_IMAGE_REF="${DEPLOY_IMAGE_REF:-unused-placeholder-see-ci-deploy-integration-lib}" \
     docker compose -p swarm_trading_staging -f docker-compose.staging.yml --env-file .ci-env-fixture "$@"
 }
 
