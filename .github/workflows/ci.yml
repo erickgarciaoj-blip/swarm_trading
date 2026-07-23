@@ -400,7 +400,6 @@ jobs:
       run:
         working-directory: swarm_trading
     env:
-      SWARM_ROOT: ${{ runner.temp }}/swarm-deploy-root
       # SHAs sintéticos (40 hex minúsculas) — uno por escenario, para que los
       # logs y los mensajes de error de cada script identifiquen sin ambigüedad
       # a qué caso de prueba pertenecen.
@@ -414,6 +413,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: swarm_trading
+
+      - name: Resolve SWARM_ROOT
+        # El contexto `runner` (y por tanto `${{ runner.temp }}`) no está
+        # disponible en el `env:` a nivel de job (ver
+        # https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability)
+        # — se resuelve aquí, en un step real, a partir de $RUNNER_TEMP (la
+        # variable de entorno, siempre disponible dentro de cualquier
+        # `run:`) y se propaga al resto del job vía $GITHUB_ENV.
+        run: echo "SWARM_ROOT=$RUNNER_TEMP/swarm-deploy-root" >> "$GITHUB_ENV"
 
       - name: Local Docker registry (never ghcr.io, never the VPS)
         run: |
@@ -684,7 +692,10 @@ jobs:
 
       - name: "Scenario: ningún servicio de docker-compose.staging.yml define build:"
         run: |
-          ! docker compose -f docker-compose.staging.yml --env-file .ci-env-fixture config | grep -q "build:"
+          if docker compose -f docker-compose.staging.yml --env-file .ci-env-fixture config | grep -q "build:"; then
+              echo "FAIL: se encontró una clave 'build:' en docker-compose.staging.yml resuelto — todas las releases deben desplegarse solo por imagen" >&2
+              exit 1
+          fi
           echo "PASS: docker compose config resuelto no contiene ninguna clave 'build:' — todas las releases se despliegan solo por imagen"
 
       - name: Diagnostics on failure
