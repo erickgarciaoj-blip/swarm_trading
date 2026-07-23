@@ -458,6 +458,19 @@ jobs:
           REDIS_URL=redis://redis:6379/0
           ENVEOF
 
+          # docker-compose.staging.yml declara `env_file: - .env` en cada
+          # servicio — Compose exige que ese archivo exista relativo al
+          # directorio del propio -f, incluso para subcomandos de solo
+          # lectura (ps/exec/logs), sin importar que dc() nunca cree ni
+          # recree migrate/swarm de verdad (eso lo hacen únicamente
+          # deploy.sh/rollback.sh/el entrypoint, con la copia de ESE release
+          # bajo $SWARM_ROOT/releases/<sha>/.env). dc() apunta al
+          # docker-compose.staging.yml de este checkout (no al de ninguna
+          # release), así que necesita su propio ".env" aquí — mismo
+          # contenido, sin ninguna implicación de seguridad (nunca se usa
+          # para desplegar nada real).
+          cp .ci-env-fixture .env
+
           # Variante "swarm" con DATABASE_URL apuntando a un host que no
           # existe en la red de Compose — deja migrate (que sigue apuntando
           # a "postgres" real) sano, y /health (liveness) sano, pero
