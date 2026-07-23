@@ -38,6 +38,16 @@ readonly HEALTH_CHECK_ATTEMPTS=20
 readonly HEALTH_CHECK_INTERVAL_SEC=3
 readonly HEALTH_URL="http://127.0.0.1:8000/health/ready"
 readonly BACKUP_RETENTION_COUNT=14
+# Servicios objetivo de cada "up -d --wait" (cutover normal y rollback
+# automático) — deliberadamente sin "migrate": ya corrió por su cuenta
+# (`run --rm migrate`, más abajo) y es un contenedor de un solo uso sin
+# política de reinicio. Incluirlo en un "up --wait" hace que Compose
+# reporte fallo aunque termine con éxito (exit 0), porque ya no está
+# "corriendo" cuando --wait lo revisa — bug conocido de Compose (ver
+# https://github.com/docker/compose/issues/10596 y
+# https://github.com/docker/compose/issues/13069), reproducido de verdad
+# por el job deploy-scripts-docker-integration antes de este fix.
+CUTOVER_SERVICES=(postgres redis swarm)
 
 LOG_FILE="$SWARM_ROOT/logs/deploy.log"
 
@@ -162,7 +172,7 @@ attempt_rollback() {
         prev_image_ref="${IMAGE_REPO}:sha-${target_sha}"
     fi
 
-    if ! DEPLOY_IMAGE_REF="$prev_image_ref" docker compose -p "$COMPOSE_PROJECT_NAME" "${prev_files[@]}" up -d --wait; then
+    if ! DEPLOY_IMAGE_REF="$prev_image_ref" docker compose -p "$COMPOSE_PROJECT_NAME" "${prev_files[@]}" up -d --wait "${CUTOVER_SERVICES[@]}"; then
         die "deploy de $SHA falló ($reason); rollback automático a $target_sha también falló al levantar el stack — intervención manual urgente"
     fi
 
@@ -212,7 +222,7 @@ fi
 log "migración OK"
 
 # --- Cutover: current NO se mueve todavía -------------------------------
-if ! docker compose -p "$COMPOSE_PROJECT_NAME" "${COMPOSE_FILES[@]}" up -d --wait; then
+if ! docker compose -p "$COMPOSE_PROJECT_NAME" "${COMPOSE_FILES[@]}" up -d --wait "${CUTOVER_SERVICES[@]}"; then
     attempt_rollback "$PREVIOUS_SHA" "docker compose up falló"
 fi
 

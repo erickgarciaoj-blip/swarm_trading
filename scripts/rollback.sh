@@ -37,6 +37,15 @@ readonly COMPOSE_PROJECT_NAME="swarm_trading_staging"
 readonly HEALTH_CHECK_ATTEMPTS=20
 readonly HEALTH_CHECK_INTERVAL_SEC=3
 readonly HEALTH_URL="http://127.0.0.1:8000/health/ready"
+# Servicios objetivo de "up -d --wait" — deliberadamente sin "migrate": el
+# rollback nunca corre migraciones (ver cabecera del archivo), pero
+# "migrate" sigue declarado en el compose sin política de reinicio; un "up
+# --wait" sin filtro lo incluiría igual y Compose reportaría fallo pese a
+# que todo termine bien, porque un contenedor de un solo uso ya no está
+# "corriendo" cuando --wait lo revisa — bug conocido de Compose (ver
+# https://github.com/docker/compose/issues/10596 y
+# https://github.com/docker/compose/issues/13069).
+CUTOVER_SERVICES=(postgres redis swarm)
 
 LOG_FILE="$SWARM_ROOT/logs/deploy.log"
 
@@ -102,7 +111,7 @@ fi
 export DEPLOY_IMAGE_REF
 log "imagen objetivo del rollback: $DEPLOY_IMAGE_REF"
 
-if ! docker compose -p "$COMPOSE_PROJECT_NAME" "${COMPOSE_FILES[@]}" up -d --wait; then
+if ! docker compose -p "$COMPOSE_PROJECT_NAME" "${COMPOSE_FILES[@]}" up -d --wait "${CUTOVER_SERVICES[@]}"; then
     die "rollback a $SHA falló al levantar el stack — intervención manual requerida"
 fi
 
