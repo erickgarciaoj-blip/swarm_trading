@@ -512,6 +512,13 @@ jobs:
           prepare_release_dir "$SHA_E" docker-compose.staging.yml "$DIGEST_E"
           prepare_release_dir "$SHA_F" docker-compose.staging.yml "$DIGEST_F"
           chmod +x scripts/deploy.sh scripts/rollback.sh scripts/ci-deploy-entrypoint.sh
+          # Copias con IMAGE_REPO -> registry local (ver cabecera de
+          # ci-deploy-integration-lib.sh) — solo las usan los escenarios que
+          # de verdad ejercitan la resolución de digest/label sin un
+          # .image-digest pre-sembrado: SHA_A (vía el entrypoint real) y el
+          # escenario de label OCI incorrecto (SHA_G) más abajo. Los
+          # scripts reales bajo scripts/ nunca se modifican.
+          setup_local_repo_scripts
 
       - name: "Scenario: primer deploy con Postgres ya corriendo y con datos (via ci-deploy-entrypoint.sh real — digest real, label OCI, current no se mueve hasta health OK)"
         run: |
@@ -547,7 +554,10 @@ jobs:
           } > bundle_a/MANIFEST
           tar -C bundle_a -cf bundle_a.tar docker-compose.yml docker-compose.staging.yml scripts MANIFEST
 
-          SSH_ORIGINAL_COMMAND="deploy $SHA_A" bash scripts/ci-deploy-entrypoint.sh < bundle_a.tar
+          # IMAGE_REPO -> registry local en esta copia (ver setup_local_repo_scripts) —
+          # todo lo demás (validación de bundle/manifest/checksum, shared/.env,
+          # label OCI, exec deploy.sh) es exactamente el mismo código real.
+          SSH_ORIGINAL_COMMAND="deploy $SHA_A" bash "$LOCAL_REPO_SCRIPTS_DIR/ci-deploy-entrypoint.sh" < bundle_a.tar
 
           assert_eq "$(current_sha)" "$SHA_A" "deploy exitoso — current apunta a SHA_A"
           assert_contains "$SWARM_ROOT/logs/deploy.log" "backup OK" "backup intentado y exitoso pese a ser 'primer deploy' (Postgres ya tenía datos)"
@@ -744,8 +754,14 @@ jobs:
           ln -sfn ../../shared/.env "$SWARM_ROOT/releases/$SHA_G/.env"
           # Sin .image-digest a propósito.
 
+          # IMAGE_REPO -> registry local en estas copias (ver
+          # setup_local_repo_scripts) — build_release_image_with_wrong_label
+          # pushea/pullea el label incorrecto exactamente bajo ese mismo
+          # nombre (${REGISTRY}/swarm_trading), así que "docker pull" aquí
+          # es un pull real contra el registry local, no una llamada de red
+          # contra el ghcr.io real.
           set +e
-          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_G" ci-integration
+          SWARM_ROOT="$SWARM_ROOT" "$LOCAL_REPO_SCRIPTS_DIR/deploy.sh" "$SHA_G" ci-integration
           DEPLOY_STATUS=$?
           set -e
           [ "$DEPLOY_STATUS" -ne 0 ] || { echo "FAIL: se esperaba que deploy.sh directo rechazara la imagen con label OCI incorrecto"; exit 1; }
@@ -755,7 +771,7 @@ jobs:
           assert_eq "$(dc ps -q swarm)" "$RUNNING_SWARM_BEFORE" "el contenedor 'swarm' no se tocó por el intento de deploy con label incorrecto"
 
           set +e
-          SWARM_ROOT="$SWARM_ROOT" scripts/rollback.sh "$SHA_G" ci-integration
+          SWARM_ROOT="$SWARM_ROOT" "$LOCAL_REPO_SCRIPTS_DIR/rollback.sh" "$SHA_G" ci-integration
           ROLLBACK_STATUS=$?
           set -e
           [ "$ROLLBACK_STATUS" -ne 0 ] || { echo "FAIL: se esperaba que rollback.sh directo rechazara la imagen con label OCI incorrecto"; exit 1; }

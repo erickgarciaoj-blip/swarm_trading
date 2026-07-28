@@ -425,11 +425,19 @@ fi
 # casos de prueba de digest/label). Filtra por $IMAGE_REPO en vez de tomar
 # el índice 0 de RepoDigests a ciegas — una imagen local puede acumular más
 # de un RepoDigest si alguna vez se etiquetó/pulleó bajo otro registry o
-# repo distinto (auditoría del PR 2, hallazgo M6).
-DIGEST_REF="$(docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$IMAGE" 2>/dev/null \
-    | grep -F "${IMAGE_REPO}@" | head -1)"
+# repo distinto (auditoría del PR 2, hallazgo M6). Sin fallback al primer
+# RepoDigest disponible: si ninguno pertenece a $IMAGE_REPO, se rechaza —
+# el `|| true` solo evita que un grep sin coincidencia mate el script en
+# silencio bajo `pipefail` (era exactamente ese el bug que rompió el primer
+# intento de este fix: `DIGEST_REF="$(pipeline)"` sin `|| true` hereda el
+# código de salida de la pipeline completa bajo `set -e`).
+DIGEST_REF="$(
+    docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$IMAGE" 2>/dev/null \
+        | grep -F "${IMAGE_REPO}@" \
+        | head -1 || true
+)"
 if [ -z "$DIGEST_REF" ]; then
-    reject "no se pudo resolver un RepoDigest de la imagen que corresponda a $IMAGE_REPO tras el pull"
+    reject "no se encontró un RepoDigest para el repositorio esperado: $IMAGE_REPO"
 fi
 printf '%s\n' "$DIGEST_REF" > "$RELEASES_DIR/$SHA/.image-digest"
 

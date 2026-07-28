@@ -196,6 +196,57 @@ if [ -e "$ROOT_LABEL_ROLLBACK/current" ]; then
 else
     pass "rollback.sh directo: label OCI no coincide — 'current' correctamente ausente"
 fi
+
+# --- RepoDigests solo contiene entradas de OTRO repositorio ---------------
+# Label correcto (pasa el paso previo), pero ninguna entrada de RepoDigests
+# pertenece a IMAGE_REPO — debe rechazar con un mensaje claro, sin caer a la
+# primera entrada disponible ni a un índice fijo, y sin morir en silencio
+# por `set -e`/`pipefail` cuando el grep no encuentra nada (auditoría del
+# PR 2, hallazgo M6 — corrección final).
+WRONG_REPO_DIGEST="docker.io/someone-else/unrelated@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+DIGEST_TEST_SHA="$(printf 'd%.0s' $(seq 1 40))"
+
+ROOT_DIGEST_DEPLOY="$WORKDIR/root_digest_deploy"
+mkdir -p "$ROOT_DIGEST_DEPLOY"
+prepare_minimal_release "$ROOT_DIGEST_DEPLOY" "$DIGEST_TEST_SHA"
+if FAKE_DOCKER_LABEL_SHA="$DIGEST_TEST_SHA" FAKE_DOCKER_DIGEST="$WRONG_REPO_DIGEST" \
+        SWARM_ROOT="$ROOT_DIGEST_DEPLOY" PATH="$FAKE_BIN:$PATH" \
+        bash "$DEPLOY_SH" "$DIGEST_TEST_SHA" ci-test > "$WORKDIR/digest_deploy_out" 2>&1; then
+    fail "deploy.sh directo: RepoDigests de otro repositorio (se esperaba rechazo, salió 0)"
+else
+    if grep -qi "RepoDigest" "$WORKDIR/digest_deploy_out" && grep -qF "ghcr.io/erickgarciaoj-blip/swarm_trading" "$WORKDIR/digest_deploy_out"; then
+        pass "deploy.sh directo: RepoDigests de otro repositorio — rechazado, el mensaje nombra el repositorio esperado"
+    else
+        fail "deploy.sh directo: RepoDigests de otro repositorio — rechazado pero sin el mensaje esperado"
+        cat "$WORKDIR/digest_deploy_out" >&2
+    fi
+fi
+if [ -f "$ROOT_DIGEST_DEPLOY/releases/$DIGEST_TEST_SHA/.image-digest" ]; then
+    fail "deploy.sh directo: RepoDigests de otro repositorio — pero .image-digest se escribió de todas formas"
+else
+    pass "deploy.sh directo: RepoDigests de otro repositorio — .image-digest correctamente ausente"
+fi
+
+ROOT_DIGEST_ROLLBACK="$WORKDIR/root_digest_rollback"
+mkdir -p "$ROOT_DIGEST_ROLLBACK"
+prepare_minimal_release "$ROOT_DIGEST_ROLLBACK" "$DIGEST_TEST_SHA"
+if FAKE_DOCKER_LABEL_SHA="$DIGEST_TEST_SHA" FAKE_DOCKER_DIGEST="$WRONG_REPO_DIGEST" \
+        SWARM_ROOT="$ROOT_DIGEST_ROLLBACK" PATH="$FAKE_BIN:$PATH" \
+        bash "$ROLLBACK_SH" "$DIGEST_TEST_SHA" ci-test > "$WORKDIR/digest_rollback_out" 2>&1; then
+    fail "rollback.sh directo: RepoDigests de otro repositorio (se esperaba rechazo, salió 0)"
+else
+    if grep -qi "RepoDigest" "$WORKDIR/digest_rollback_out" && grep -qF "ghcr.io/erickgarciaoj-blip/swarm_trading" "$WORKDIR/digest_rollback_out"; then
+        pass "rollback.sh directo: RepoDigests de otro repositorio — rechazado, el mensaje nombra el repositorio esperado"
+    else
+        fail "rollback.sh directo: RepoDigests de otro repositorio — rechazado pero sin el mensaje esperado"
+        cat "$WORKDIR/digest_rollback_out" >&2
+    fi
+fi
+if [ -f "$ROOT_DIGEST_ROLLBACK/releases/$DIGEST_TEST_SHA/.image-digest" ]; then
+    fail "rollback.sh directo: RepoDigests de otro repositorio — pero .image-digest se escribió de todas formas"
+else
+    pass "rollback.sh directo: RepoDigests de otro repositorio — .image-digest correctamente ausente"
+fi
 fi  # command -v flock
 
 # --- flock no bloqueante: mecanismo real, mismo patrón que deploy.sh/

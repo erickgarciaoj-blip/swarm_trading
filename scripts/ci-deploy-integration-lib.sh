@@ -14,6 +14,47 @@ set -euo pipefail
 
 REGISTRY="localhost:5000"
 
+# --- Copias del arnés con IMAGE_REPO apuntando al registry local ----------
+# deploy.sh/rollback.sh (rama directa) y ci-deploy-entrypoint.sh (paso 5)
+# exigen un RepoDigest que pertenezca EXACTAMENTE a $IMAGE_REPO — sin
+# fallback a índice 0 (auditoría del PR 2, hallazgos H1/M6). Eso es
+# correcto para producción, pero Docker solo puebla RepoDigests con push/
+# pull reales contra un nombre de registry concreto — un `docker tag` local
+# (como el alias ghcr.io/... que build_release_image crea) NUNCA genera una
+# entrada de RepoDigests bajo ese nombre. Este job jamás pushea/pullea de
+# verdad contra ghcr.io (a propósito, ver cabecera de build_release_image),
+# así que la verificación real de digest/label de deploy.sh/rollback.sh/
+# entrypoint solo puede ejercitarse de punta a punta contra Docker real si
+# el repositorio ESPERADO por esos scripts coincide con el que este arnés
+# sí puede producir de verdad: el registry local.
+#
+# Por eso, en vez de añadir una variable de entorno que sortee IMAGE_REPO
+# en el camino de producción (eso SÍ debilitaría la validación real), se
+# generan copias de los tres scripts con la única línea "IMAGE_REPO=..."
+# sustituida — los archivos reales bajo scripts/ nunca se tocan, y la
+# semántica de producción (repositorio esperado = ghcr.io/erickgarciaoj-
+# blip/swarm_trading, sin fallback, rechazo explícito si no hay
+# coincidencia) queda intacta y se prueba aparte, sin Docker real, con un
+# `docker` falso (ver test_ci_deploy_entrypoint_rejects_invalid_input.sh y
+# test_deploy_and_rollback_scripts.sh: casos de RepoDigests de otro repo).
+#
+# Ruta fija (no mktemp): cada step de este job es un shell nuevo que vuelve
+# a `source`ear este archivo, así que la ruta debe ser reproducible entre
+# steps sin depender de una variable dinámica propagada por $GITHUB_ENV.
+# $RUNNER_TEMP ya es estable durante todo el job (se usa igual para
+# SWARM_ROOT).
+LOCAL_REPO_SCRIPTS_DIR="${RUNNER_TEMP:-/tmp}/local-repo-scripts"
+
+setup_local_repo_scripts() {
+    mkdir -p "$LOCAL_REPO_SCRIPTS_DIR"
+    local f
+    for f in ci-deploy-entrypoint.sh deploy.sh rollback.sh; do
+        sed 's#^\(readonly \)\{0,1\}IMAGE_REPO="ghcr\.io/erickgarciaoj-blip/swarm_trading"#\1IMAGE_REPO="'"${REGISTRY}"'/swarm_trading"#' \
+            "scripts/$f" > "$LOCAL_REPO_SCRIPTS_DIR/$f"
+        chmod +x "$LOCAL_REPO_SCRIPTS_DIR/$f"
+    done
+}
+
 # Wrapper usado por todo `docker compose` ad hoc del job — siempre explícito
 # sobre -p/-f/--env-file, igual que deploy.sh/rollback.sh, para que nunca
 # pueda caer silenciosamente en docker-compose.yml (el de dev, con

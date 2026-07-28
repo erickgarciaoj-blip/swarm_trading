@@ -139,10 +139,18 @@ else
 
     # Filtra por $IMAGE_REPO en vez de tomar el índice 0 de RepoDigests a
     # ciegas — una imagen local puede acumular más de un RepoDigest si
-    # alguna vez se etiquetó/pulleó bajo otro registry o repo distinto.
-    DEPLOY_IMAGE_REF="$(docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$TAG_REF" 2>/dev/null \
-        | grep -F "${IMAGE_REPO}@" | head -1)"
-    [ -n "$DEPLOY_IMAGE_REF" ] || die "no se pudo resolver un RepoDigest de $TAG_REF que corresponda a $IMAGE_REPO"
+    # alguna vez se etiquetó/pulleó bajo otro registry o repo distinto. Sin
+    # fallback al primer RepoDigest disponible: si ninguno pertenece a
+    # $IMAGE_REPO, se rechaza — el `|| true` solo evita que un grep sin
+    # coincidencia mate el script en silencio bajo `pipefail` (sin él,
+    # `DEPLOY_IMAGE_REF="$(pipeline)"` hereda el código de salida de la
+    # pipeline completa bajo `set -e` y el script muere sin ningún mensaje).
+    DEPLOY_IMAGE_REF="$(
+        docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$TAG_REF" 2>/dev/null \
+            | grep -F "${IMAGE_REPO}@" \
+            | head -1 || true
+    )"
+    [ -n "$DEPLOY_IMAGE_REF" ] || die "no se encontró un RepoDigest para el repositorio esperado: $IMAGE_REPO"
     printf '%s\n' "$DEPLOY_IMAGE_REF" > "$DIGEST_FILE"
 fi
 export DEPLOY_IMAGE_REF

@@ -409,6 +409,35 @@ else
     fi
 fi
 
+# --- imagen: RepoDigests solo contiene entradas de OTRO repositorio --------
+# Label correcto (pasa el paso previo), pero ninguna entrada de RepoDigests
+# pertenece a $IMAGE_REPO — debe rechazar con un mensaje claro que nombre el
+# repositorio esperado, SIN caer a la primera entrada disponible ni a un
+# índice fijo (auditoría del PR 2, hallazgo M6 — corrección final: filtro
+# estricto, sin fallback, y sin morir en silencio por `set -e`/`pipefail`
+# cuando el grep no encuentra nada).
+ROOT_WRONG_REPO_DIGEST="$(mktemp -d "$WORKDIR/root.XXXXXX")"
+mkdir -p "$ROOT_WRONG_REPO_DIGEST/shared"
+printf 'POSTGRES_PASSWORD=ci-test\n' > "$ROOT_WRONG_REPO_DIGEST/shared/.env"
+chmod 600 "$ROOT_WRONG_REPO_DIGEST/shared/.env"
+WRONG_REPO_DIGEST="docker.io/someone-else/unrelated@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+if FAKE_DOCKER_DIGEST="$WRONG_REPO_DIGEST" \
+        run_entrypoint "$ROOT_WRONG_REPO_DIGEST" "deploy $SHA" "$B_VALID" "$SHA"; then
+    fail "RepoDigests de otro repositorio (se esperaba rechazo, salió 0)"
+else
+    if grep -qi "RepoDigest" "$WORKDIR/last_stderr" && grep -qF "ghcr.io/erickgarciaoj-blip/swarm_trading" "$WORKDIR/last_stderr"; then
+        pass "RepoDigests de otro repositorio — rechazado, el mensaje nombra el repositorio esperado"
+    else
+        fail "RepoDigests de otro repositorio — rechazado pero sin el mensaje esperado"
+        cat "$WORKDIR/last_stderr" >&2
+    fi
+    if [ -f "$ROOT_WRONG_REPO_DIGEST/releases/$SHA/.image-digest" ]; then
+        fail "RepoDigests de otro repositorio — pero .image-digest se escribió de todas formas"
+    else
+        pass "RepoDigests de otro repositorio — .image-digest correctamente ausente"
+    fi
+fi
+
 # --- SWARM_ROOT inválido ----------------------------------------------------
 if SWARM_ROOT="/" SSH_ORIGINAL_COMMAND="deploy $SHA" PATH="$FAKE_BIN:$PATH" \
         bash "$ENTRYPOINT" < "$B_VALID" > "$WORKDIR/o1" 2>&1; then
