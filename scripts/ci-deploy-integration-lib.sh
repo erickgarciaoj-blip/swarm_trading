@@ -55,6 +55,26 @@ build_release_image() {
     docker inspect --format '{{index .RepoDigests 0}}' "$ghcr_tag"
 }
 
+# Igual que build_release_image, pero hornea un label OCI que NO coincide
+# con el SHA del tag de la imagen — usada para probar que deploy.sh/
+# rollback.sh, invocados directamente (sin pasar por el entrypoint),
+# rechazan la imagen por su cuenta antes de tocar backup/migración/
+# contenedores (auditoría del PR 2, hallazgo H1: esa verificación no existía
+# en absoluto en la ruta directa).
+build_release_image_with_wrong_label() {
+    local sha="$1" wrong_label_sha="$2"
+    local reg_tag="${REGISTRY}/swarm_trading:sha-${sha}"
+    local ghcr_tag="ghcr.io/erickgarciaoj-blip/swarm_trading:sha-${sha}"
+    local cid
+    cid="$(docker create swarm_test_base:ci)"
+    docker commit --change "LABEL org.opencontainers.image.revision=${wrong_label_sha}" "$cid" "$reg_tag" >/dev/null
+    docker rm "$cid" >/dev/null
+    docker push "$reg_tag" >/dev/null
+    docker rmi "$reg_tag" >/dev/null
+    docker pull "$reg_tag" >/dev/null
+    docker tag "$reg_tag" "$ghcr_tag"
+}
+
 # shared/.env: un único archivo persistente, creado UNA vez (igual que en el
 # runbook, paso 16) — cada release lo consume por symlink, nunca por copia.
 # Para SHA_A (el único que pasa por el entrypoint real) el propio entrypoint

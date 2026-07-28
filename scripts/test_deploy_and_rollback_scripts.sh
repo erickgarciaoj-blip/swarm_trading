@@ -83,6 +83,121 @@ else
     pass "rollback.sh: release inexistente rechazado sin reconstruir nada"
 fi
 
+# --- Label OCI no coincide — invocación directa de deploy.sh/rollback.sh,
+# sin pasar por el entrypoint (hallazgo H1 de la auditoría del PR 2: esta
+# rama de verificación no existía en absoluto en la ruta directa). Usa un
+# `docker` falso en PATH (mismo patrón que
+# test_ci_deploy_entrypoint_rejects_invalid_input.sh) para ejercitar la
+# lógica real de deploy.sh/rollback.sh sin depender de Docker/Compose
+# reales — el escenario Docker real equivalente vive en el job
+# "deploy-scripts-docker-integration" de ci.yml.
+#
+# Requiere `flock` real (deploy.sh/rollback.sh lo exigen antes de llegar a
+# la resolución de imagen) — no disponible por defecto en macOS, igual que
+# la prueba de flock más abajo en este mismo archivo.
+if ! command -v flock >/dev/null 2>&1; then
+    echo "SKIP: flock no disponible en este sistema (macOS) — pruebas de label OCI en deploy.sh/rollback.sh directos no verificables aquí, sí en el VPS objetivo y en el job Docker de CI" >&2
+else
+FAKE_BIN="$WORKDIR/fakebin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+    pull) exit 0 ;;
+    inspect)
+        fmt=""
+        for arg in "$@"; do
+            case "$arg" in
+                --format) next_is_fmt=1 ;;
+                *)
+                    if [ "${next_is_fmt:-0}" = "1" ]; then fmt="$arg"; next_is_fmt=0; fi
+                    ;;
+            esac
+        done
+        case "$fmt" in
+            *Labels*) echo "${FAKE_DOCKER_LABEL_SHA:-}" ;;
+            *RepoDigests*)
+                echo "${FAKE_DOCKER_DIGEST:-ghcr.io/erickgarciaoj-blip/swarm_trading@sha256:0000000000000000000000000000000000000000000000000000000000000000}"
+                ;;
+            *) echo "" ;;
+        esac
+        exit 0 ;;
+    *) echo "fake docker: subcomando no soportado en pruebas: $1" >&2; exit 1 ;;
+esac
+DOCKEREOF
+chmod +x "$FAKE_BIN/docker"
+
+prepare_minimal_release() {
+    # Uso: prepare_minimal_release <SWARM_ROOT> <sha>
+    # Deja releases/<sha>/ con lo mínimo que deploy.sh/rollback.sh exigen
+    # ANTES de llegar a la resolución de imagen — a propósito sin
+    # .image-digest, para forzar la rama de resolución directa (docker pull
+    # + verificación de label) que es la que este bloque quiere ejercitar.
+    local root="$1" sha="$2"
+    local dir="$root/releases/$sha"
+    mkdir -p "$dir/scripts"
+    printf 'services: {}\n' > "$dir/docker-compose.yml"
+    printf 'services: {}\n' > "$dir/docker-compose.staging.yml"
+    printf '#!/usr/bin/env bash\necho deploy\n' > "$dir/scripts/deploy.sh"
+    printf '#!/usr/bin/env bash\necho rollback\n' > "$dir/scripts/rollback.sh"
+    chmod +x "$dir/scripts/deploy.sh" "$dir/scripts/rollback.sh"
+}
+
+LABEL_TEST_SHA="$(printf 'e%.0s' $(seq 1 40))"
+WRONG_LABEL_SHA="$(printf 'f%.0s' $(seq 1 40))"
+
+ROOT_LABEL_DEPLOY="$WORKDIR/root_label_deploy"
+mkdir -p "$ROOT_LABEL_DEPLOY"
+prepare_minimal_release "$ROOT_LABEL_DEPLOY" "$LABEL_TEST_SHA"
+if FAKE_DOCKER_LABEL_SHA="$WRONG_LABEL_SHA" SWARM_ROOT="$ROOT_LABEL_DEPLOY" PATH="$FAKE_BIN:$PATH" \
+        bash "$DEPLOY_SH" "$LABEL_TEST_SHA" ci-test > "$WORKDIR/label_deploy_out" 2>&1; then
+    fail "deploy.sh directo: label OCI no coincide (se esperaba rechazo, salió 0)"
+else
+    if grep -qi "label OCI" "$WORKDIR/label_deploy_out" && grep -qi "no coincide" "$WORKDIR/label_deploy_out"; then
+        pass "deploy.sh directo: label OCI no coincide — rechazado con el mensaje esperado, antes de tocar backup/migración/contenedores"
+    else
+        fail "deploy.sh directo: label OCI no coincide — rechazado pero sin el mensaje esperado"
+        cat "$WORKDIR/label_deploy_out" >&2
+    fi
+fi
+if [ -f "$ROOT_LABEL_DEPLOY/releases/$LABEL_TEST_SHA/.image-digest" ]; then
+    fail "deploy.sh directo: label OCI no coincide — pero .image-digest se escribió de todas formas"
+else
+    pass "deploy.sh directo: label OCI no coincide — .image-digest correctamente ausente"
+fi
+if [ -e "$ROOT_LABEL_DEPLOY/current" ]; then
+    fail "deploy.sh directo: label OCI no coincide — pero 'current' quedó creado"
+else
+    pass "deploy.sh directo: label OCI no coincide — 'current' correctamente ausente"
+fi
+
+ROOT_LABEL_ROLLBACK="$WORKDIR/root_label_rollback"
+mkdir -p "$ROOT_LABEL_ROLLBACK"
+prepare_minimal_release "$ROOT_LABEL_ROLLBACK" "$LABEL_TEST_SHA"
+if FAKE_DOCKER_LABEL_SHA="$WRONG_LABEL_SHA" SWARM_ROOT="$ROOT_LABEL_ROLLBACK" PATH="$FAKE_BIN:$PATH" \
+        bash "$ROLLBACK_SH" "$LABEL_TEST_SHA" ci-test > "$WORKDIR/label_rollback_out" 2>&1; then
+    fail "rollback.sh directo: label OCI no coincide (se esperaba rechazo, salió 0)"
+else
+    if grep -qi "label OCI" "$WORKDIR/label_rollback_out" && grep -qi "no coincide" "$WORKDIR/label_rollback_out"; then
+        pass "rollback.sh directo: label OCI no coincide — rechazado con el mensaje esperado, antes de tocar el stack"
+    else
+        fail "rollback.sh directo: label OCI no coincide — rechazado pero sin el mensaje esperado"
+        cat "$WORKDIR/label_rollback_out" >&2
+    fi
+fi
+if [ -f "$ROOT_LABEL_ROLLBACK/releases/$LABEL_TEST_SHA/.image-digest" ]; then
+    fail "rollback.sh directo: label OCI no coincide — pero .image-digest se escribió de todas formas"
+else
+    pass "rollback.sh directo: label OCI no coincide — .image-digest correctamente ausente"
+fi
+if [ -e "$ROOT_LABEL_ROLLBACK/current" ]; then
+    fail "rollback.sh directo: label OCI no coincide — pero 'current' quedó creado"
+else
+    pass "rollback.sh directo: label OCI no coincide — 'current' correctamente ausente"
+fi
+fi  # command -v flock
+
 # --- flock no bloqueante: mecanismo real, mismo patrón que deploy.sh/
 # rollback.sh (exec 9>lockfile; flock -n 9). Dos procesos reales compitiendo
 # por el mismo lockfile — no una simulación de la lógica.

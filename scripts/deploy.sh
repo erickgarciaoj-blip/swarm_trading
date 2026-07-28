@@ -64,6 +64,15 @@ die() {
     exit 1
 }
 
+# Quita bytes de control (incluye \n, \r) de un valor que no pasó por una
+# regex propia (p. ej. LABEL_SHA, leído del label OCI de una imagen Docker —
+# controlado por quien tenga push al registry) antes de interpolarlo en una
+# línea de log — sin esto, un valor con saltos de línea podría forjar
+# entradas falsas en deploy.log (auditoría del PR 2, hallazgo L1).
+sanitize_log_value() {
+    printf '%s' "$1" | tr -d '\000-\037\177'
+}
+
 # --- Argumentos --------------------------------------------------------
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "uso: $0 <sha completo, 40 hex> [actor]" >&2
@@ -74,7 +83,7 @@ if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
     echo "$COMPONENT: SHA inválido: '$SHA'" >&2
     exit 1
 fi
-ACTOR="${2:-${SUDO_USER:-$(id -un)}}"
+ACTOR="$(sanitize_log_value "${2:-${SUDO_USER:-$(id -un)}}")"
 if [[ ! "$ACTOR" =~ ^[A-Za-z0-9_.-]{1,100}$ ]]; then
     ACTOR="unknown"
 fi
@@ -114,10 +123,26 @@ DIGEST_FILE="$RELEASE_DIR/.image-digest"
 if [ -f "$DIGEST_FILE" ]; then
     DEPLOY_IMAGE_REF="$(cat "$DIGEST_FILE")"
 else
+    # Invocación directa (sin pasar por ci-deploy-entrypoint.sh) — nadie
+    # verificó todavía el label OCI ni resolvió un digest real para este SHA.
+    # Se repite aquí, ANTES de tocar backup/migración/cutover, la misma
+    # verificación que el entrypoint hace en su paso 5 (ver ADR-0011): sin
+    # esto, un tag `sha-<sha>` mal etiquetado en el registry se desplegaría
+    # sin que nada lo note (auditoría del PR 2, hallazgo H1).
     TAG_REF="${IMAGE_REPO}:sha-${SHA}"
     docker pull "$TAG_REF" || die "no se pudo obtener $TAG_REF"
-    DEPLOY_IMAGE_REF="$(docker inspect --format '{{index .RepoDigests 0}}' "$TAG_REF" 2>/dev/null || true)"
-    [ -n "$DEPLOY_IMAGE_REF" ] || die "no se pudo resolver el digest de $TAG_REF"
+
+    LABEL_SHA="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$TAG_REF" 2>/dev/null || true)"
+    if [ "$LABEL_SHA" != "$SHA" ]; then
+        die "label OCI org.opencontainers.image.revision ('$(sanitize_log_value "$LABEL_SHA")') no coincide con el SHA solicitado ($SHA) — $TAG_REF rechazada antes de tocar backup/migración/contenedores"
+    fi
+
+    # Filtra por $IMAGE_REPO en vez de tomar el índice 0 de RepoDigests a
+    # ciegas — una imagen local puede acumular más de un RepoDigest si
+    # alguna vez se etiquetó/pulleó bajo otro registry o repo distinto.
+    DEPLOY_IMAGE_REF="$(docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$TAG_REF" 2>/dev/null \
+        | grep -F "${IMAGE_REPO}@" | head -1)"
+    [ -n "$DEPLOY_IMAGE_REF" ] || die "no se pudo resolver un RepoDigest de $TAG_REF que corresponda a $IMAGE_REPO"
     printf '%s\n' "$DEPLOY_IMAGE_REF" > "$DIGEST_FILE"
 fi
 export DEPLOY_IMAGE_REF
@@ -235,10 +260,14 @@ ln -sfn "$RELEASE_DIR" "$SWARM_ROOT/current"
 log "deploy de $SHA exitoso — current actualizado (previo: ${PREVIOUS_SHA:-<ninguna>})"
 
 # --- Poda de backups: solo tras un ciclo completo exitoso ---------------
+# Glob limitado al patrón exacto que este script genera (BACKUP_FILE, más
+# arriba) — nunca *.sql.gz genérico, que podría alcanzar backups ajenos
+# dejados a mano en el mismo directorio (p. ej. el backup de prueba del
+# runbook, paso 18) (auditoría del PR 2, hallazgo M4).
 BACKUP_DIR="$SWARM_ROOT/backups"
 if [ -d "$BACKUP_DIR" ]; then
     # shellcheck disable=SC2012 # nombres generados por este mismo script, formato fijo — ls -t es seguro aquí
-    ls -1t "$BACKUP_DIR"/*.sql.gz 2>/dev/null | tail -n +$((BACKUP_RETENTION_COUNT + 1)) | while IFS= read -r old; do
+    ls -1t "$BACKUP_DIR"/pre-deploy_*.sql.gz 2>/dev/null | tail -n +$((BACKUP_RETENTION_COUNT + 1)) | while IFS= read -r old; do
         rm -f -- "$old"
         log "backup podado: $old"
     done

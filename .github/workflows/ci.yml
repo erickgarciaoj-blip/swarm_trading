@@ -409,6 +409,7 @@ jobs:
       SHA_D: "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4" # variante "migrate" que falla a propósito
       SHA_E: "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5" # deploy usado para el escenario de fallo de backup
       SHA_F: "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6" # segundo deploy en el escenario de flock concurrente
+      SHA_G: "07070707070707070707070707070707070707" # imagen con label OCI incorrecto — deploy.sh/rollback.sh directos deben rechazarla
     steps:
       - uses: actions/checkout@v4
         with:
@@ -552,6 +553,24 @@ jobs:
           assert_contains "$SWARM_ROOT/logs/deploy.log" "backup OK" "backup intentado y exitoso pese a ser 'primer deploy' (Postgres ya tenía datos)"
           assert_contains "$SWARM_ROOT/logs/deploy.log" "migración OK" "migración corrió antes del cutover"
           assert_contains "$SWARM_ROOT/logs/deploy.log" "deploy de $SHA_A exitoso" "deploy.sh reportó éxito"
+
+          # El mensaje "backup OK" solo prueba que deploy.sh lo CREYÓ exitoso
+          # — se confirma aparte, de forma independiente, que el archivo
+          # existe y contiene de verdad los datos previos al deploy (no solo
+          # el mensaje de log) (auditoría del PR 2, hallazgo L2).
+          BACKUP_FILE_A="$(ls -t "$SWARM_ROOT/backups"/pre-deploy_"${SHA_A}"_*.sql.gz | head -1)"
+          [ -s "$BACKUP_FILE_A" ] || { echo "FAIL: el archivo de backup de SHA_A no existe o está vacío ($BACKUP_FILE_A)" >&2; exit 1; }
+          gzip -t "$BACKUP_FILE_A"
+          gzip -dc "$BACKUP_FILE_A" | dc exec -T postgres pg_restore -l - | grep -q "ci_backup_marker" \
+              || { echo "FAIL: el backup no contiene la tabla marcador esperada (ci_backup_marker) — no es un dump real de los datos previos al deploy" >&2; exit 1; }
+          echo "PASS: backup de SHA_A contiene realmente los datos previos al deploy (tabla ci_backup_marker confirmada dentro del propio dump, no solo el mensaje de log)"
+
+          # Igual para "migración OK": se confirma que alembic_version tiene
+          # un valor real en la base tras el deploy, no solo que deploy.sh
+          # dijo que corrió (auditoría del PR 2, hallazgo L2).
+          ALEMBIC_VERSION_A="$(dc exec -T postgres psql -U swarm -d swarm_trading_ci_deploy -tAc 'SELECT version_num FROM alembic_version;' | tr -d '[:space:]')"
+          [ -n "$ALEMBIC_VERSION_A" ] || { echo "FAIL: alembic_version está vacía tras el deploy de SHA_A — no hay evidencia de que 'alembic upgrade head' corriera de verdad" >&2; exit 1; }
+          echo "PASS: alembic_version tiene un valor real tras la migración de SHA_A ($ALEMBIC_VERSION_A) — confirma que la migración corrió de verdad, no solo el mensaje de log"
 
           # shared/.env: el entrypoint debe haber validado permisos/
           # propietario y dejado el symlink exacto — antes de que cualquiera
@@ -702,6 +721,48 @@ jobs:
           [ "$BG_STATUS" -eq 0 ] || { echo "FAIL: el deploy en background (SHA_B) debía completar exitosamente"; cat "$RUNNER_TEMP/bg-deploy.log"; exit 1; }
           echo "PASS: el deploy en background (SHA_B) completó una vez liberado el lock"
           assert_eq "$(current_sha)" "$SHA_B" "current es SHA_B — el intento rechazado (SHA_F) nunca tocó nada"
+
+      - name: "Scenario: label OCI no coincide — deploy.sh y rollback.sh directos deben rechazar antes de tocar nada (hallazgo H1)"
+        # A diferencia de ci-deploy-entrypoint.sh (que siempre verificó el
+        # label), deploy.sh/rollback.sh invocados directamente — sin pasar
+        # por el entrypoint, el mismo camino documentado en el runbook para
+        # el primer deploy manual — no verificaban el label OCI en absoluto
+        # antes de esta corrección. Imagen real, con label OCI de OTRO SHA
+        # horneado a propósito, y sin .image-digest preexistente (fuerza la
+        # rama de resolución directa).
+        run: |
+          source scripts/ci-deploy-integration-lib.sh
+          RUNNING_SWARM_BEFORE="$(dc ps -q swarm)"
+
+          build_release_image_with_wrong_label "$SHA_G" "$SHA_B"
+          mkdir -p "$SWARM_ROOT/releases/$SHA_G/scripts"
+          cp docker-compose.yml "$SWARM_ROOT/releases/$SHA_G/docker-compose.yml"
+          cp docker-compose.staging.yml "$SWARM_ROOT/releases/$SHA_G/docker-compose.staging.yml"
+          cp scripts/deploy.sh "$SWARM_ROOT/releases/$SHA_G/scripts/deploy.sh"
+          cp scripts/rollback.sh "$SWARM_ROOT/releases/$SHA_G/scripts/rollback.sh"
+          chmod +x "$SWARM_ROOT/releases/$SHA_G/scripts/deploy.sh" "$SWARM_ROOT/releases/$SHA_G/scripts/rollback.sh"
+          ln -sfn ../../shared/.env "$SWARM_ROOT/releases/$SHA_G/.env"
+          # Sin .image-digest a propósito.
+
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_G" ci-integration
+          DEPLOY_STATUS=$?
+          set -e
+          [ "$DEPLOY_STATUS" -ne 0 ] || { echo "FAIL: se esperaba que deploy.sh directo rechazara la imagen con label OCI incorrecto"; exit 1; }
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "label OCI" "deploy.sh directo detectó el label OCI incorrecto (Docker real, no un mock)"
+          [ ! -f "$SWARM_ROOT/releases/$SHA_G/.image-digest" ] || { echo "FAIL: .image-digest no debía escribirse tras el rechazo por label (deploy.sh)"; exit 1; }
+          assert_eq "$(current_sha)" "$SHA_B" "current no cambió — el deploy de SHA_G con label incorrecto nunca llegó al cutover"
+          assert_eq "$(dc ps -q swarm)" "$RUNNING_SWARM_BEFORE" "el contenedor 'swarm' no se tocó por el intento de deploy con label incorrecto"
+
+          set +e
+          SWARM_ROOT="$SWARM_ROOT" scripts/rollback.sh "$SHA_G" ci-integration
+          ROLLBACK_STATUS=$?
+          set -e
+          [ "$ROLLBACK_STATUS" -ne 0 ] || { echo "FAIL: se esperaba que rollback.sh directo rechazara la imagen con label OCI incorrecto"; exit 1; }
+          assert_contains "$SWARM_ROOT/logs/deploy.log" "label OCI" "rollback.sh directo detectó el label OCI incorrecto (Docker real, no un mock)"
+          [ ! -f "$SWARM_ROOT/releases/$SHA_G/.image-digest" ] || { echo "FAIL: .image-digest no debía escribirse tras el rechazo por label (rollback.sh)"; exit 1; }
+          assert_eq "$(current_sha)" "$SHA_B" "current no cambió — el rollback a SHA_G con label incorrecto nunca llegó al cutover"
+          assert_eq "$(dc ps -q swarm)" "$RUNNING_SWARM_BEFORE" "el contenedor 'swarm' no se tocó por el intento de rollback con label incorrecto"
 
       - name: "Scenario: ningún servicio de docker-compose.staging.yml define build:"
         run: |

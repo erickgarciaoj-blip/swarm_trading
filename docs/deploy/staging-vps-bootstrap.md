@@ -349,6 +349,8 @@ sudo -u swarm-deploy /opt/swarm-trading/scripts/rollback.sh <sha_al_que_volver>
 
 El SHA objetivo es siempre explícito — el script nunca infiere "el anterior" por su cuenta, para que quede claro en el log a qué versión exacta se volvió y quién lo pidió.
 
+**Si el rollback falla su propio health check:** `rollback.sh` no reintenta (evita loops) y **no revierte** lo que acaba de levantar — en ese momento `current` puede ya **no representar lo que está corriendo**: `current` sigue apuntando a la release previa al rollback, pero los contenedores reales ya son los de la release a la que se intentaba volver (no saludable). No confíes en `current` para saber qué está desplegado justo después de un rollback fallido — revisa en cambio el mensaje `ADVERTENCIA` que el propio `rollback.sh` deja en `logs/deploy.log`, que incluye explícitamente el SHA objetivo del rollback, a qué SHA sigue apuntando `current`, y el ID del contenedor `swarm` en ese momento. Requiere intervención manual (típicamente: diagnosticar por qué la release objetivo no pasa el health check, o forzar un `rollback.sh` a una tercera release conocida-buena).
+
 ## 21. Procedimiento de recuperación
 
 Si en algún punto del hardening de SSH (paso 5) o del firewall (paso 6) quedas sin acceso:

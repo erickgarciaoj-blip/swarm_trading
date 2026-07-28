@@ -2,10 +2,12 @@
 #
 # Valida el paso "shared/.env" de ci-deploy-entrypoint.sh (Fase 4.6, PR 2/4
 # — cierre del gap de secretos, ver ADR-0011): shared/.env debe existir, ser
-# un archivo regular, no world-readable, pertenecer al usuario que corre el
-# entrypoint, y el symlink resultante releases/<sha>/.env debe apuntar
-# exactamente a ../../shared/.env — todo antes de exec deploy.sh (o sea,
-# antes de backup, migración o cualquier cambio de contenedores).
+# un archivo regular, sin ningún permiso para grupo u otros (600 o más
+# restrictivo — no solo "no world-readable", ver auditoría del PR 2,
+# hallazgo M3), pertenecer al usuario que corre el entrypoint, y el symlink
+# resultante releases/<sha>/.env debe apuntar exactamente a
+# ../../shared/.env — todo antes de exec deploy.sh (o sea, antes de backup,
+# migración o cualquier cambio de contenedores).
 #
 # Corre el script REAL, igual que
 # test_ci_deploy_entrypoint_rejects_invalid_input.sh: un SWARM_ROOT temporal
@@ -180,28 +182,38 @@ else
 fi
 
 # =========================================================================
-# 2. shared/.env con permisos demasiado abiertos (world-readable)
+# 2. shared/.env con permisos demasiado abiertos — world-readable (644),
+#    y group-readable/writable (640, 660) (auditoría del PR 2, hallazgo M3:
+#    antes solo se rechazaba world-readable, un 640/660 pasaba sin problema)
 # =========================================================================
-SHA2="$(printf '2%.0s' $(seq 1 40))"
-B2="$WORKDIR/b2.tar"
-build_bundle "$B2" "$SHA2" > /dev/null
-ROOT2="$(mktemp -d "$WORKDIR/root.XXXXXX")"
-setup_shared_env "$ROOT2" 644
+assert_perms_rejected() {
+    local label="$1" perms="$2"
+    local sha b root
+    sha="$(head -c 40 /dev/zero | tr '\0' "$label")"
+    b="$WORKDIR/perm_${perms}.tar"
+    build_bundle "$b" "$sha" > /dev/null
+    root="$(mktemp -d "$WORKDIR/root.XXXXXX")"
+    setup_shared_env "$root" "$perms"
 
-if run_entrypoint "$ROOT2" "deploy $SHA2" "$B2" "$SHA2"; then
-    fail "shared/.env world-readable (se esperaba rechazo)"
-else
-    if grep -qF "world-readable" "$WORKDIR/last_stderr"; then
-        pass "shared/.env world-readable (644) — rechazado con el mensaje esperado"
-    else
-        fail "shared/.env world-readable — rechazado pero sin el mensaje esperado"
+    if run_entrypoint "$root" "deploy $sha" "$b" "$sha"; then
+        fail "shared/.env con permisos $perms (se esperaba rechazo)"
+        return
     fi
-    if [ -e "$ROOT2/releases/$SHA2/.env" ]; then
-        fail "shared/.env world-readable — pero releases/$SHA2/.env quedó creado"
+    if grep -qF "permisos demasiado abiertos" "$WORKDIR/last_stderr"; then
+        pass "shared/.env con permisos $perms — rechazado con el mensaje esperado"
     else
-        pass "shared/.env world-readable — releases/$SHA2/.env correctamente ausente"
+        fail "shared/.env con permisos $perms — rechazado pero sin el mensaje esperado"
     fi
-fi
+    if [ -e "$root/releases/$sha/.env" ]; then
+        fail "shared/.env con permisos $perms — pero releases/\$sha/.env quedó creado"
+    else
+        pass "shared/.env con permisos $perms — releases/\$sha/.env correctamente ausente"
+    fi
+}
+
+assert_perms_rejected "2" 644
+assert_perms_rejected "6" 640
+assert_perms_rejected "7" 660
 
 # --- variante: shared/.env no es un archivo regular (es un symlink) -----
 # No es uno de los 5 casos pedidos explícitamente, pero "que es archivo

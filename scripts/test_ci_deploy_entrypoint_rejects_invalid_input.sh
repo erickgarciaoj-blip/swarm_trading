@@ -377,6 +377,38 @@ assert_rejected "manifest con actor inválido" "$SHA" "deploy $SHA" "$B_BAD_ACTO
 B_BAD_CHECKSUM="$WORKDIR/bad_checksum.tar"; build_bundle checksum-invalid "$B_BAD_CHECKSUM" "$SHA"
 assert_rejected "checksum inválido" "$SHA" "deploy $SHA" "$B_BAD_CHECKSUM"
 
+# --- imagen: label OCI no coincide con el SHA solicitado -------------------
+# Bundle, manifest y checksum válidos — solo el label de la imagen está mal.
+# assert_rejected no sirve aquí: siempre pasa el mismo SHA como label falso
+# (4to arg de run_entrypoint), así que nunca simula un mismatch. Debe
+# rechazarse ANTES de que "current" o cualquier release quede promovida
+# (auditoría del PR 2, hallazgos H1/M1 — antes de esta prueba, esta rama de
+# rechazo no tenía ninguna cobertura).
+ROOT_LABEL_MISMATCH="$(mktemp -d "$WORKDIR/root.XXXXXX")"
+mkdir -p "$ROOT_LABEL_MISMATCH/shared"
+printf 'POSTGRES_PASSWORD=ci-test\n' > "$ROOT_LABEL_MISMATCH/shared/.env"
+chmod 600 "$ROOT_LABEL_MISMATCH/shared/.env"
+WRONG_LABEL_SHA="$(printf 'b%.0s' $(seq 1 40))"
+if run_entrypoint "$ROOT_LABEL_MISMATCH" "deploy $SHA" "$B_VALID" "$WRONG_LABEL_SHA"; then
+    fail "label OCI no coincide con el SHA solicitado (se esperaba rechazo, salió 0)"
+else
+    if grep -qi "label OCI" "$WORKDIR/last_stderr" && grep -qi "no coincide" "$WORKDIR/last_stderr"; then
+        pass "label OCI no coincide con el SHA solicitado (rechazado con diagnóstico correcto)"
+    else
+        fail "label OCI no coincide (rechazado, pero sin el mensaje esperado)"
+    fi
+    if [ -e "$ROOT_LABEL_MISMATCH/current" ]; then
+        fail "label OCI no coincide — pero 'current' quedó creado (no debía tocar nada más allá de la extracción del bundle)"
+    else
+        pass "label OCI no coincide — 'current' correctamente ausente"
+    fi
+    if [ -f "$ROOT_LABEL_MISMATCH/releases/$SHA/.image-digest" ]; then
+        fail "label OCI no coincide — pero .image-digest se escribió de todas formas"
+    else
+        pass "label OCI no coincide — .image-digest correctamente ausente"
+    fi
+fi
+
 # --- SWARM_ROOT inválido ----------------------------------------------------
 if SWARM_ROOT="/" SSH_ORIGINAL_COMMAND="deploy $SHA" PATH="$FAKE_BIN:$PATH" \
         bash "$ENTRYPOINT" < "$B_VALID" > "$WORKDIR/o1" 2>&1; then

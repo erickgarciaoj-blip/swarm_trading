@@ -71,6 +71,15 @@ reject() {
     exit 1
 }
 
+# Quita bytes de control (incluye \n, \r) de un valor externo antes de
+# interpolarlo en una línea de log — LABEL_SHA sale del label de una imagen
+# Docker (controlado por quien tenga push al registry) y ACTOR sale del
+# MANIFEST del bundle; ninguno de los dos debe poder forjar entradas falsas
+# en deploy.log (auditoría del PR 2, hallazgo L1).
+sanitize_log_value() {
+    printf '%s' "$1" | tr -d '\000-\037\177'
+}
+
 TMP_BUNDLE=""
 cleanup() {
     [ -n "$TMP_BUNDLE" ] && rm -f "$TMP_BUNDLE"
@@ -330,6 +339,16 @@ if __name__ == "__main__":
 PYEOF
 )" || reject "validación del bundle falló (ver detalle arriba)"
 
+# --- ACTOR: desde aquí en adelante, log()/reject() usan el actor real ------
+# El MANIFEST ya fue extraído y su ACTOR= ya pasó ACTOR_RE en el validador
+# Python de arriba (PROMOTED e IDEMPOTENT dejan igualmente un MANIFEST
+# válido en disco) — antes de este punto no existía todavía de forma
+# confiable, así que los pasos 1-3 quedan en log con actor=unknown por
+# necesidad (nada validado todavía). A partir de aquí (pasos 4-6) el actor
+# real queda registrado en cada línea (auditoría del PR 2, hallazgo M2).
+ACTOR="$(sanitize_log_value "$(grep '^ACTOR=' "$RELEASES_DIR/$SHA/MANIFEST" | head -1 | cut -d= -f2-)")"
+[ -n "$ACTOR" ] || ACTOR="unknown"
+
 case "$RESULT" in
     RESULT=PROMOTED) log "bundle validado y extraído a releases/$SHA" ;;
     RESULT=IDEMPOTENT) log "redeploy idéntico del mismo SHA — release existente reutilizada" ;;
@@ -362,11 +381,15 @@ else
     SHARED_ENV_OWNER_UID="$(stat -f '%u' "$SHARED_ENV")"
 fi
 
-# World-readable = el dígito octal de "otros" (el último) tiene el bit 4
-# (lectura) encendido — 4, 5, 6 o 7.
+# Se exige 600 (o más restrictivo, p. ej. 400) — grupo y otros deben
+# carecer de CUALQUIER permiso, no solo lectura. Antes esto solo rechazaba
+# world-readable (dígito de "otros" con el bit 4 encendido); un 640/660
+# (legible por el grupo) pasaba sin problema. Grupo = segundo dígito octal
+# desde la derecha, otros = el último (auditoría del PR 2, hallazgo M3).
+GROUP_PERM_DIGIT=$(( (8#$SHARED_ENV_PERMS / 8) % 8 ))
 OTHER_PERM_DIGIT=$(( 8#$SHARED_ENV_PERMS % 8 ))
-if (( OTHER_PERM_DIGIT & 4 )); then
-    reject "shared/.env es world-readable (permisos $SHARED_ENV_PERMS) — corrige con chmod antes de reintentar"
+if (( GROUP_PERM_DIGIT != 0 || OTHER_PERM_DIGIT != 0 )); then
+    reject "shared/.env tiene permisos demasiado abiertos (permisos $SHARED_ENV_PERMS) — se exige 600 o más restrictivo (grupo y otros sin ningún permiso); corrige con chmod antes de reintentar"
 fi
 
 if [ "$SHARED_ENV_OWNER_UID" != "$(id -u)" ]; then
@@ -392,22 +415,25 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 LABEL_SHA="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE" 2>/dev/null || true)"
 if [ "$LABEL_SHA" != "$SHA" ]; then
-    reject "label OCI org.opencontainers.image.revision ('$LABEL_SHA') no coincide con el SHA solicitado"
+    reject "label OCI org.opencontainers.image.revision ('$(sanitize_log_value "$LABEL_SHA")') no coincide con el SHA solicitado"
 fi
 
 # Captura el digest resuelto AHORA (no vuelve a resolverse por tag más
 # adelante) y lo deja como artefacto local de la release — deploy.sh lo lee
 # y despliega por digest, no por tag mutable, cerrando la ventana entre
 # "esta verificación" y "lo que realmente se ejecuta" (ver ADR-0011 y los
-# casos de prueba de digest/label).
-DIGEST_REF="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null || true)"
+# casos de prueba de digest/label). Filtra por $IMAGE_REPO en vez de tomar
+# el índice 0 de RepoDigests a ciegas — una imagen local puede acumular más
+# de un RepoDigest si alguna vez se etiquetó/pulleó bajo otro registry o
+# repo distinto (auditoría del PR 2, hallazgo M6).
+DIGEST_REF="$(docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$IMAGE" 2>/dev/null \
+    | grep -F "${IMAGE_REPO}@" | head -1)"
 if [ -z "$DIGEST_REF" ]; then
-    reject "no se pudo resolver el digest de la imagen tras el pull"
+    reject "no se pudo resolver un RepoDigest de la imagen que corresponda a $IMAGE_REPO tras el pull"
 fi
 printf '%s\n' "$DIGEST_REF" > "$RELEASES_DIR/$SHA/.image-digest"
 
 log "imagen verificada: tag=$IMAGE digest=$DIGEST_REF label_ok=true"
 
 # --- 6. Ejecutar el deploy, sin eval ----------------------------------------
-ACTOR_LINE="$(grep '^ACTOR=' "$RELEASES_DIR/$SHA/MANIFEST" | head -1 | cut -d= -f2-)"
-exec "$RELEASES_DIR/$SHA/scripts/deploy.sh" "$SHA" "${ACTOR_LINE:-unknown}"
+exec "$RELEASES_DIR/$SHA/scripts/deploy.sh" "$SHA" "$ACTOR"
