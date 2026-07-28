@@ -571,7 +571,11 @@ jobs:
           BACKUP_FILE_A="$(ls -t "$SWARM_ROOT/backups"/pre-deploy_"${SHA_A}"_*.sql.gz | head -1)"
           [ -s "$BACKUP_FILE_A" ] || { echo "FAIL: el archivo de backup de SHA_A no existe o está vacío ($BACKUP_FILE_A)" >&2; exit 1; }
           gzip -t "$BACKUP_FILE_A"
-          gzip -dc "$BACKUP_FILE_A" | dc exec -T postgres pg_restore -l - | grep -q "ci_backup_marker" \
+          # pg_restore lee de stdin cuando el argumento de archivo se OMITE
+          # — a diferencia de otras herramientas Unix, "-" no es un alias
+          # de stdin para pg_restore (falla con "could not open input file
+          # '-'"); se omite el argumento por completo.
+          gzip -dc "$BACKUP_FILE_A" | dc exec -T postgres pg_restore -l | grep -q "ci_backup_marker" \
               || { echo "FAIL: el backup no contiene la tabla marcador esperada (ci_backup_marker) — no es un dump real de los datos previos al deploy" >&2; exit 1; }
           echo "PASS: backup de SHA_A contiene realmente los datos previos al deploy (tabla ci_backup_marker confirmada dentro del propio dump, no solo el mensaje de log)"
 
