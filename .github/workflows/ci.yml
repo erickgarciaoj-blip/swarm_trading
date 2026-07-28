@@ -409,7 +409,7 @@ jobs:
       SHA_D: "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4" # variante "migrate" que falla a propósito
       SHA_E: "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5" # deploy usado para el escenario de fallo de backup
       SHA_F: "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6" # segundo deploy en el escenario de flock concurrente
-      SHA_G: "07070707070707070707070707070707070707" # imagen con label OCI incorrecto — deploy.sh/rollback.sh directos deben rechazarla
+      SHA_G: "0707070707070707070707070707070707070707" # imagen con label OCI incorrecto — deploy.sh/rollback.sh directos deben rechazarla (40 hex: "07" x20)
     steps:
       - uses: actions/checkout@v4
         with:
