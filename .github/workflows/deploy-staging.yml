@@ -1,0 +1,154 @@
+name: Deploy Staging (build & push)
+
+# Fase 4.6, PR 3/4 (ver ADR-0011 y ARCHITECTURE_REVIEW.md). Alcance
+# estrictamente build+push a GHCR — sin conexión al VPS, sin deploy.sh,
+# sin secretos SSH. Eso llega en el PR 4/4, en un job de deploy separado
+# (concurrency propia del lado del deploy, ver ADR-0011).
+#
+# Disparado por `workflow_run` sobre `CI` (nunca por push/pull_request
+# directo) para no reutilizar nada del run que lo origina: este workflow
+# arranca de cero, hace su propio checkout del `head_sha` exacto que CI
+# validó, y construye la imagen desde ese código fuente — nunca desde
+# artifacts subidos por el run de CI, y nunca desde la punta mutable de
+# `main` (que puede haberse movido si dos merges llegan seguidos).
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+# Techo de permisos para todos los jobs de este workflow — nada de
+# id-token, actions:write, pull-requests, deployments ni contents:write.
+permissions:
+  contents: read
+  packages: write
+
+# Evita builds/push duplicados del mismo SHA si el workflow_run se
+# reintenta o dispara más de una vez — deja que el primero termine en vez
+# de cancelarlo (mismo criterio que ADR-0011 aplica al lado del deploy).
+concurrency:
+  group: build-push-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    # Cuatro condiciones, las tres primeras del diseño original de
+    # ADR-0011 más una cuarta obligatoria: sin `head_repository.full_name
+    # == github.repository`, un fork podría nombrar su propia rama `main`
+    # y `head_branch == 'main'` sería verdadero sin ser el `main` real de
+    # este repositorio.
+    if: >
+      github.event.workflow_run.name == 'CI' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPO: ghcr.io/erickgarciaoj-blip/swarm_trading
+      IMAGE_SOURCE: https://github.com/erickgarciaoj-blip/swarm_trading
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # path: swarm_trading — mismo motivo que el job docker-build de
+      # ci.yml (ver ADR-0002): el import `swarm_trading.*` solo resuelve
+      # si el directorio de checkout se llama exactamente así.
+      #
+      # Las cuatro actions de este workflow están fijadas por SHA de commit
+      # completo, no por tag móvil — este workflow tiene packages: write, y
+      # un tag como @v4 puede reapuntarse a un commit distinto sin que el
+      # archivo cambie. Cada SHA fue verificado por triplicado contra la API
+      # pública de GitHub (tags, git/refs/tags, releases) antes de fijarlo
+      # aquí — ninguno es inventado.
+      - name: Checkout the exact commit CI validated (never main's mutable tip)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: swarm_trading
+
+      - name: Confirm checked-out SHA matches workflow_run.head_sha exactly
+        working-directory: swarm_trading
+        run: |
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Checked-out SHA ($ACTUAL_SHA) no coincide con workflow_run.head_sha ($HEAD_SHA)"
+            exit 1
+          fi
+          echo "Checked-out SHA confirmado: $ACTUAL_SHA"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR (GITHUB_TOKEN, nunca un PAT)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Único tag publicado: sha-<head_sha completo>. Nunca latest, nunca
+      # un tag abreviado, nunca un tag de rama o de PR. Dos labels: revision
+      # (SHA exacto) y source (URL del repo) — ambos verificados de forma
+      # independiente en el paso siguiente, tras un pull real.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: swarm_trading
+          push: true
+          tags: ${{ env.IMAGE_REPO }}:sha-${{ env.HEAD_SHA }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.HEAD_SHA }}
+            org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
+
+      # Verificación real post-publicación — no confía en que el build
+      # "debió" quedar bien: hace un pull fresco desde GHCR (no el cache
+      # local del builder) y confirma tag, ambos labels OCI y digest de
+      # forma independiente, cruzando además el digest resuelto por pull
+      # real contra el que reportó la propia build-push-action.
+      - name: Verify published image — tag, labels, and digest all match head_sha
+        run: |
+          FULL_REF="${IMAGE_REPO}:sha-${HEAD_SHA}"
+          ACTION_DIGEST="${{ steps.build.outputs.digest }}"
+
+          TAG_SHA="${FULL_REF#"${IMAGE_REPO}:sha-"}"
+          if [ "$TAG_SHA" != "$HEAD_SHA" ] || [ "${#TAG_SHA}" -ne 40 ]; then
+            echo "::error::Tag publicado no contiene el SHA completo de 40 caracteres esperado: $FULL_REF"
+            exit 1
+          fi
+
+          docker pull "$FULL_REF"
+
+          LABEL_REVISION="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$FULL_REF")"
+          if [ "$LABEL_REVISION" != "$HEAD_SHA" ]; then
+            echo "::error::Label org.opencontainers.image.revision ('$LABEL_REVISION') no coincide con head_sha ('$HEAD_SHA')"
+            exit 1
+          fi
+
+          LABEL_SOURCE="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$FULL_REF")"
+          if [ "$LABEL_SOURCE" != "$IMAGE_SOURCE" ]; then
+            echo "::error::Label org.opencontainers.image.source ('$LABEL_SOURCE') no coincide con la URL esperada ('$IMAGE_SOURCE')"
+            exit 1
+          fi
+
+          DIGEST_REF="$(
+              docker inspect --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$FULL_REF" \
+                  | grep -F "${IMAGE_REPO}@" \
+                  | head -1 || true
+          )"
+          if [ -z "$DIGEST_REF" ]; then
+            echo "::error::No se encontró un RepoDigest publicado que pertenezca a $IMAGE_REPO"
+            exit 1
+          fi
+
+          PULLED_DIGEST="${DIGEST_REF#"${IMAGE_REPO}@"}"
+          if [ -n "$ACTION_DIGEST" ] && [ "$ACTION_DIGEST" != "$PULLED_DIGEST" ]; then
+            echo "::error::El digest reportado por build-push-action ($ACTION_DIGEST) no coincide con el resuelto vía pull real ($PULLED_DIGEST)"
+            exit 1
+          fi
+
+          echo "Tag verificado: $FULL_REF"
+          echo "Label OCI verificado: org.opencontainers.image.revision=$LABEL_REVISION"
+          echo "Label OCI verificado: org.opencontainers.image.source=$LABEL_SOURCE"
+          echo "Digest publicado (confirmado vía pull real): $DIGEST_REF"
