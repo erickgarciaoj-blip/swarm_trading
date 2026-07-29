@@ -619,6 +619,14 @@ jobs:
 
           SWARM_ROOT="$SWARM_ROOT" scripts/deploy.sh "$SHA_B" ci-integration
           assert_eq "$(current_sha)" "$SHA_B" "deploy directo de SHA_B exitoso"
+          # FOLLOW-UP menor pendiente (auditoría del PR 2, hallazgo L2): esta
+          # aserción todavía confía solo en el texto "backup OK" del log, a
+          # diferencia del escenario de SHA_A (más arriba, "primer deploy...")
+          # que además verifica el contenido real del backup vía
+          # `pg_restore -l` y el valor real de `alembic_version`. Aplicar el
+          # mismo patrón aquí (o factorizarlo en un helper) queda pendiente,
+          # sin bloquear — no representa una brecha de seguridad, solo una
+          # aserción de test menos rigurosa de lo posible.
           assert_contains "$SWARM_ROOT/logs/deploy.log" "backup OK" "backup real exitoso con Postgres ya corriendo y con datos"
 
           # Redeploy del mismo SHA — debe volver a funcionar de punta a
