@@ -1,0 +1,110 @@
+# Compose de staging — completo y autocontenido, NO se combina con
+# docker-compose.yml (que sí viaja en cada release por trazabilidad/
+# referencia, pero deploy.sh y rollback.sh invocan Docker Compose usando
+# únicamente este archivo).
+#
+# Por qué autocontenido en vez de `-f docker-compose.yml -f docker-compose.staging.yml`
+# (ver ADR-0011 y la discusión de diseño del PR 2): el archivo base define
+# `migrate`/`swarm` con `build: .` — pensado para desarrollo local, donde
+# construir tiene sentido. Un override que solo añade `image:` sin anular
+# `build:` deja ambos presentes tras el merge, y el comportamiento de
+# Compose ante esa combinación varía entre versiones. En vez de depender de
+# `!reset` (Compose Spec, soporte no garantizado en todas las versiones),
+# este archivo redefine el stack completo sin `build:` en ningún lado —
+# duplicación moderada a cambio de cero ambigüedad de merge, portable entre
+# versiones de Compose.
+#
+# `swarm-deploy` despliega SIEMPRE por digest resuelto (variable de entorno
+# DEPLOY_IMAGE_REF, exportada por deploy.sh/rollback.sh tras verificar el
+# label OCI — nunca un tag mutable) — ver ci-deploy-entrypoint.sh.
+#
+# nginx queda fuera de este archivo a propósito: staging sigue siendo
+# accesible solo por localhost/SSH en esta fase (ver runbook, sección 6).
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-swarm_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-swarm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-swarm} -d ${POSTGRES_DB:-swarm_trading}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - swarm_net
+    logging: *default-logging
+    # Sin mapeo de puerto al host, igual que en docker-compose.yml — nunca
+    # alcanzable desde fuera de swarm_net.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - swarm_net
+    logging: *default-logging
+
+  # Aplica migraciones pendientes con la imagen inmutable de esta release.
+  # `swarm-deploy` (via deploy.sh) lo corre explícitamente con `run --rm`
+  # antes de tocar `swarm` — nunca como parte automática de `up` aquí,
+  # a diferencia de docker-compose.yml (dev), para que el orden
+  # backup -> migrate -> swap quede controlado por deploy.sh, no por
+  # `depends_on`.
+  migrate:
+    image: ${DEPLOY_IMAGE_REF:?DEPLOY_IMAGE_REF must be set by deploy.sh/rollback.sh}
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+    networks:
+      - swarm_net
+    entrypoint: ["alembic", "upgrade", "head"]
+    logging: *default-logging
+
+  swarm:
+    image: ${DEPLOY_IMAGE_REF:?DEPLOY_IMAGE_REF must be set by deploy.sh/rollback.sh}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # Liveness únicamente (igual que docker-compose.yml, ver ADR-0009) —
+      # el readiness real (/health/ready) lo valida deploy.sh/rollback.sh
+      # por HTTP, no Compose.
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - swarm_net
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+
+networks:
+  swarm_net:
