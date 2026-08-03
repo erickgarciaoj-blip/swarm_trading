@@ -1,0 +1,121 @@
+# Compose para desplegar en Coolify (staging paper-trading) — completo y
+# autocontenido, NO se combina con docker-compose.yml ni con
+# docker-compose.staging.yml (misma razón que documenta el encabezado de
+# docker-compose.staging.yml: cero ambigüedad de merge entre versiones de
+# Compose).
+#
+# Diferencias deliberadas contra docker-compose.yml (dev local):
+#
+# 1. Sin `ports:` hacia el host. En el VPS de Coolify el puerto 8000 ya lo
+#    ocupa el propio Coolify, y publicar en 127.0.0.1 no sirve detrás de su
+#    proxy. La exposición se hace vía Traefik (el proxy de Coolify) con los
+#    labels de `swarm` — dominio en ${SWARM_DOMAIN} y, como el dashboard no
+#    tiene autenticación propia y /swarm/halt es un POST abierto, Basic Auth
+#    obligatorio en ${SWARM_BASIC_AUTH} (formato htpasswd, p. ej.
+#    `openssl passwd -apr1` — el compose se niega a arrancar sin ambas).
+# 2. Sin `redis`: ningún código de la app lo usa todavía (Fase 5 del
+#    ARCHITECTURE_REVIEW). Se agrega aquí cuando esa fase aterrice.
+# 3. `migrate` sigue siendo gate de arranque de `swarm`
+#    (service_completed_successfully), igual que en dev — Coolify solo hace
+#    `docker compose up`, así que el orden lo garantiza este archivo.
+#
+# Variables requeridas (se configuran en Coolify → Environment Variables):
+#   POSTGRES_PASSWORD  — sin default, igual que en los otros compose
+#   SWARM_DOMAIN       — p. ej. swarm.aova.mx (DNS apuntando al VPS)
+#   SWARM_BASIC_AUTH   — usuario:hash htpasswd para el dashboard
+#   APP_ENV            — paper (default aquí; nunca `live` en este stack:
+#                        este despliegue corre el broker simulado)
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-swarm_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-swarm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-swarm} -d ${POSTGRES_DB:-swarm_trading}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - swarm_net
+    logging: *default-logging
+    # Sin mapeo de puerto al host y fuera de la red del proxy — solo
+    # migrate/swarm en swarm_net pueden alcanzarlo.
+
+  migrate:
+    build: .
+    image: swarm-trading:coolify
+    environment:
+      APP_ENV: ${APP_ENV:-paper}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - swarm_net
+    entrypoint: ["alembic", "upgrade", "head"]
+    logging: *default-logging
+
+  swarm:
+    build: .
+    image: swarm-trading:coolify
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-paper}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness únicamente (/health, nunca /health/ready) — ver ADR-0009.
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - swarm_net
+      - coolify
+    labels:
+      # Router propio con nombre determinista, en vez del que generaría
+      # Coolify al asignar dominio en su UI: así el Basic Auth queda definido
+      # en este archivo versionado y no puede existir una ruta pública sin él.
+      # En Coolify NO se asigna dominio a este servicio — Traefik lee estos
+      # labels directamente.
+      - traefik.enable=true
+      - traefik.http.middlewares.swarm-trading-auth.basicauth.users=${SWARM_BASIC_AUTH:?SWARM_BASIC_AUTH must be set (htpasswd user:hash)}
+      - traefik.http.middlewares.swarm-trading-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.swarm-trading-http.rule=Host(`${SWARM_DOMAIN:?SWARM_DOMAIN must be set}`)
+      - traefik.http.routers.swarm-trading-http.entryPoints=http
+      - traefik.http.routers.swarm-trading-http.middlewares=swarm-trading-redirect
+      - traefik.http.routers.swarm-trading-https.rule=Host(`${SWARM_DOMAIN}`)
+      - traefik.http.routers.swarm-trading-https.entryPoints=https
+      - traefik.http.routers.swarm-trading-https.tls=true
+      - traefik.http.routers.swarm-trading-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.swarm-trading-https.middlewares=swarm-trading-auth
+      - traefik.http.routers.swarm-trading-https.service=swarm-trading
+      - traefik.http.services.swarm-trading.loadbalancer.server.port=8000
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+
+networks:
+  swarm_net:
+  # Red del proxy de Coolify (Traefik) — ya existe en el VPS.
+  coolify:
+    external: true
