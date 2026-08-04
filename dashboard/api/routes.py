@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -48,6 +48,11 @@ def set_orchestrator(orch) -> None:
 def set_repository(repo) -> None:
     global _repository
     _repository = repo
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/frontend/", status_code=307)
 
 
 @app.get("/health")
