@@ -107,13 +107,17 @@ services:
       # labels directamente.
       #
       # OJO con la interpolación aquí: el parser de compose de Coolify escapa
-      # todo `${VAR}` de las labels a `$${VAR}` (literal), así que la forma con
-      # llaves NUNCA se interpola. El dominio va hardcodeado (es público) y el
-      # hash htpasswd se referencia como `$SWARM_BASIC_AUTH` sin llaves — esa
-      # forma sobrevive al parser y compose sí la resuelve desde el .env que
-      # Coolify genera. El hash no se hardcodea porque este repo es PÚBLICO.
+      # TODO `$...` de las labels (tanto `${VAR}` como `$VAR`) a `$$...`
+      # literal, así que referenciar variables de entorno en labels es
+      # imposible — ambas formas llegan a Traefik sin interpolar. El dominio va
+      # hardcodeado (es público) y el hash htpasswd va inline crudo: el escape
+      # de Coolify (`$apr1` → `$$apr1`) es justo lo que compose necesita para
+      # entregarle a Traefik los `$` literales. La contraseña detrás del hash
+      # es aleatoria de 20 caracteres — md5crypt no es crackeable a esa
+      # entropía aunque este repo sea público. Para rotarla:
+      #   openssl passwd -apr1 '<nueva>'  → reemplazar el hash aquí.
       - traefik.enable=true
-      - traefik.http.middlewares.swarm-trading-auth.basicauth.users=$SWARM_BASIC_AUTH
+      - traefik.http.middlewares.swarm-trading-auth.basicauth.users=aova:$apr1$tj37LbEr$xeycMPfkR1i/H558SyuFK0
       - traefik.http.middlewares.swarm-trading-redirect.redirectscheme.scheme=https
       - traefik.http.routers.swarm-trading-http.rule=Host(`swarm.aova.mx`)
       - traefik.http.routers.swarm-trading-http.entryPoints=http
