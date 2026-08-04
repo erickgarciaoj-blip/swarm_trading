@@ -49,7 +49,15 @@ services:
       timeout: 5s
       retries: 10
     networks:
-      - swarm_net
+      # Alias único porque el contenedor `swarm` también vive en la red
+      # `coolify`, donde otras apps tienen su propio servicio llamado
+      # "postgres": el DNS de Docker puede resolver ese nombre genérico hacia
+      # la IP de OTRO proyecto (síntoma real: "password authentication failed"
+      # intermitente). El DATABASE_URL usa este alias, que solo existe en
+      # swarm_net.
+      swarm_net:
+        aliases:
+          - swarm-trading-db
     logging: *default-logging
     # Sin mapeo de puerto al host y fuera de la red del proxy — solo
     # migrate/swarm en swarm_net pueden alcanzarlo.
@@ -67,7 +75,7 @@ services:
     restart: "no"
     environment:
       APP_ENV: ${APP_ENV:-paper}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@swarm-trading-db:5432/${POSTGRES_DB:-swarm_trading}
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,7 +91,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-paper}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@swarm-trading-db:5432/${POSTGRES_DB:-swarm_trading}
     depends_on:
       postgres:
         condition: service_healthy
