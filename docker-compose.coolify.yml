@@ -21,8 +21,9 @@
 #
 # Variables requeridas (se configuran en Coolify → Environment Variables):
 #   POSTGRES_PASSWORD  — sin default, igual que en los otros compose
-#   SWARM_DOMAIN       — p. ej. swarm.aova.mx (DNS apuntando al VPS)
 #   SWARM_BASIC_AUTH   — usuario:hash htpasswd para el dashboard
+#                        (`openssl passwd -apr1`; el dominio ya no es variable,
+#                        va hardcodeado en las labels — ver nota ahí)
 #   APP_ENV            — paper (default aquí; nunca `live` en este stack:
 #                        este despliegue corre el broker simulado)
 
@@ -104,13 +105,20 @@ services:
       # en este archivo versionado y no puede existir una ruta pública sin él.
       # En Coolify NO se asigna dominio a este servicio — Traefik lee estos
       # labels directamente.
+      #
+      # OJO con la interpolación aquí: el parser de compose de Coolify escapa
+      # todo `${VAR}` de las labels a `$${VAR}` (literal), así que la forma con
+      # llaves NUNCA se interpola. El dominio va hardcodeado (es público) y el
+      # hash htpasswd se referencia como `$SWARM_BASIC_AUTH` sin llaves — esa
+      # forma sobrevive al parser y compose sí la resuelve desde el .env que
+      # Coolify genera. El hash no se hardcodea porque este repo es PÚBLICO.
       - traefik.enable=true
-      - traefik.http.middlewares.swarm-trading-auth.basicauth.users=${SWARM_BASIC_AUTH:?SWARM_BASIC_AUTH must be set (htpasswd user:hash)}
+      - traefik.http.middlewares.swarm-trading-auth.basicauth.users=$SWARM_BASIC_AUTH
       - traefik.http.middlewares.swarm-trading-redirect.redirectscheme.scheme=https
-      - traefik.http.routers.swarm-trading-http.rule=Host(`${SWARM_DOMAIN:?SWARM_DOMAIN must be set}`)
+      - traefik.http.routers.swarm-trading-http.rule=Host(`swarm.aova.mx`)
       - traefik.http.routers.swarm-trading-http.entryPoints=http
       - traefik.http.routers.swarm-trading-http.middlewares=swarm-trading-redirect
-      - traefik.http.routers.swarm-trading-https.rule=Host(`${SWARM_DOMAIN}`)
+      - traefik.http.routers.swarm-trading-https.rule=Host(`swarm.aova.mx`)
       - traefik.http.routers.swarm-trading-https.entryPoints=https
       - traefik.http.routers.swarm-trading-https.tls=true
       - traefik.http.routers.swarm-trading-https.tls.certresolver=letsencrypt
