@@ -117,6 +117,11 @@ services:
       # entropía aunque este repo sea público. Para rotarla:
       #   openssl passwd -apr1 '<nueva>'  → reemplazar el hash aquí.
       - traefik.enable=true
+      # Imprescindible con un contenedor en varias redes: sin esto Traefik
+      # elige una IP arbitraria del contenedor y a veces cae en swarm_net (que
+      # no comparte con él) — los requests se cuelgan hasta timeout de forma
+      # intermitente entre deploys.
+      - traefik.docker.network=coolify
       - traefik.http.middlewares.swarm-trading-auth.basicauth.users=aova:$apr1$tj37LbEr$xeycMPfkR1i/H558SyuFK0
       - traefik.http.middlewares.swarm-trading-redirect.redirectscheme.scheme=https
       - traefik.http.routers.swarm-trading-http.rule=Host(`swarm.aova.mx`)
