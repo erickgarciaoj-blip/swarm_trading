@@ -54,7 +54,10 @@ services:
     # migrate/swarm en swarm_net pueden alcanzarlo.
 
   migrate:
-    build: .
+    # Sin `build:` a propósito: si migrate y swarm construyen los dos el mismo
+    # tag, BuildKit los exporta en paralelo y el deploy muere con
+    # `image "swarm-trading:coolify": already exists`. Solo swarm construye;
+    # migrate reutiliza la imagen ya construida.
     image: swarm-trading:coolify
     environment:
       APP_ENV: ${APP_ENV:-paper}
