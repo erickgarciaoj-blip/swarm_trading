@@ -59,6 +59,11 @@ services:
     # `image "swarm-trading:coolify": already exists`. Solo swarm construye;
     # migrate reutiliza la imagen ya construida.
     image: swarm-trading:coolify
+    # Explícito porque Coolify inyecta una política de restart a los servicios
+    # que no declaran una: sin esto, el one-shot de alembic se re-ejecuta en
+    # bucle, service_completed_successfully nunca se cumple y swarm jamás
+    # arranca (el deploy se queda colgado esperando el healthcheck).
+    restart: "no"
     environment:
       APP_ENV: ${APP_ENV:-paper}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm_trading}
