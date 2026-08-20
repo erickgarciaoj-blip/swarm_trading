@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from dataclasses import replace
 from datetime import datetime
 
 from loguru import logger
@@ -104,29 +105,41 @@ NQ_POINT_VALUE = 20.0  # 1 point NQ = $20 USD
 CL_POINT_VALUE = 1_000.0  # 1 point CL = $1,000 USD
 
 
+def unit_notional_usd(symbol: str, price: float) -> float:
+    """USD value of ONE whole tradable unit of `symbol` at `price`: one
+    futures contract, one ounce of gold, or one share. This is the smallest
+    position IBKR will accept, so it is also the minimum notional an order
+    has to cover to be placeable at all."""
+    if symbol in ("NAS100", "US100"):
+        return price * NQ_POINT_VALUE
+    if symbol == "OIL":
+        return price * CL_POINT_VALUE
+    # XAUUSD quotes per ounce and STK per share — both are already the
+    # per-unit price, so no multiplier applies.
+    return price
+
+
 def resolve_order_quantity(symbol: str, notional_usd: float, price: float) -> int:
     """USD-notional + reference price → whole units to send to IBKR
-    (contracts for futures, oz for XAUUSD, shares for stocks)."""
-    if symbol in ("NAS100", "US100"):
-        point_value = NQ_POINT_VALUE
-        # notional / (price * point_value) = contratos
-        contracts = notional_usd / (price * point_value)
-        return max(1, int(contracts))
+    (contracts for futures, oz for XAUUSD, shares for stocks).
 
-    elif symbol == "OIL":
-        point_value = CL_POINT_VALUE
-        contracts = notional_usd / (price * point_value)
-        return max(1, int(contracts))
+    Returns 0 when `notional_usd` does not cover one whole unit, and
+    deliberately does NOT round up to 1. The previous `max(1, int(...))`
+    floor silently discarded the caller's sizing entirely: a $30 notional on
+    NAS100 resolves to 0.0000513 contracts, which the floor turned into one
+    whole NQ contract — roughly $584,000 of exposure for an agent holding
+    $1,000, with no log and no exception. Under-sizing to zero is a rejected
+    order; over-sizing to one unit is a real position nobody asked for.
 
-    elif symbol == "XAUUSD":
-        # 1 oz de oro ~ precio actual
-        # mínimo 1 oz, máximo lo que alcance el notional
-        oz = notional_usd / price
-        return max(1, int(oz))
-
-    else:  # STK (PLTR, etc.)
-        shares = notional_usd / price
-        return max(1, int(shares))
+    Callers are responsible for treating 0 as "not placeable at this
+    notional" — see IBKRBroker.execute(), which rejects instead of placing.
+    """
+    if price <= 0 or notional_usd <= 0:
+        return 0
+    unit_value = unit_notional_usd(symbol, price)
+    if unit_value <= 0:
+        return 0
+    return int(notional_usd / unit_value)
 
 
 CONNECT_TIMEOUT_SEC = 10
@@ -283,6 +296,13 @@ class IBKRBroker(BrokerInterface):
             )
             return trade
 
+        # Sizing is resolved BEFORE any order id is claimed or any order is
+        # transmitted, so an unplaceable notional costs nothing and leaves no
+        # half-built bracket behind.
+        qty = resolve_order_quantity(proposal.symbol.value, float(proposal.quantity), float(proposal.price))
+        if qty <= 0:
+            return self._reject_insufficient_notional(proposal)
+
         contract = get_contract(proposal.symbol.value)
 
         parent_id = self._next_id()
@@ -291,7 +311,6 @@ class IBKRBroker(BrokerInterface):
 
         entry_action = "BUY" if proposal.side == Side.LONG else "SELL"
         exit_action = "SELL" if proposal.side == Side.LONG else "BUY"
-        qty = resolve_order_quantity(proposal.symbol.value, float(proposal.quantity), float(proposal.price))
 
         parent = self._new_order(parent_id, entry_action, proposal.agent_id)
         parent.orderType = "MKT"
@@ -358,6 +377,44 @@ class IBKRBroker(BrokerInterface):
         )
         return trade
 
+    def _reject_insufficient_notional(self, proposal: OrderProposal) -> ExecutedTrade:
+        """Rejection path for a notional too small to buy one whole unit.
+
+        Returns a REJECTED ExecutedTrade rather than raising: execute()'s
+        existing contract already expresses "the order did not become a
+        position" that way (see the fill-timeout branch below), and callers
+        — SwarmOrchestrator._process_agent — are built around a returned
+        trade, not an exception. Keeping both non-fill outcomes on the same
+        shape avoids inventing a second error channel for one case.
+
+        trade_id is a fresh uuid, never a broker order id: no order was
+        placed, so there is no id from IBKR to reference. Nothing here is
+        registered in _open_trades — a rejected order is not a position.
+        """
+        unit_value = unit_notional_usd(proposal.symbol.value, float(proposal.price))
+        logger.warning(
+            "[IBKR] INSUFFICIENT_NOTIONAL "
+            f"symbol={proposal.symbol.value} "
+            f"agent={proposal.agent_id} "
+            f"requested_notional={proposal.quantity} "
+            f"reference_price={proposal.price} "
+            f"min_notional_for_1_unit={unit_value:.2f} "
+            f"minimum_units=1 "
+            f"resolved_units=0"
+        )
+        return ExecutedTrade(
+            trade_id=str(uuid.uuid4()),
+            agent_id=proposal.agent_id,
+            symbol=proposal.symbol,
+            side=proposal.side,
+            entry_price=0.0,
+            quantity=proposal.quantity,
+            sl_price=proposal.sl_price,
+            tp_price=proposal.tp_price,
+            status=OrderStatus.REJECTED,
+            opened_at=datetime.utcnow(),
+        )
+
     def _on_order_status(self, order_id: int, status: str, avg_fill_price: float) -> None:
         if status != "Filled":
             return
@@ -369,9 +426,27 @@ class IBKRBroker(BrokerInterface):
     # ─── Positions ───────────────────────────────────────────────────────────
 
     async def get_open_positions(self) -> list[ExecutedTrade]:
-        if self._offline:
-            return []
-        return list(self._open_trades.values())
+        """Every trade this adapter currently holds open, offline and live
+        alike.
+
+        Offline used to return [] here, which was not "no positions" but
+        "positions hidden": check_tp_sl() resolves the very same _open_trades
+        entries, so the swarm held real paper positions its own orchestrator
+        could not see. Everything downstream inherited the blind spot —
+        floating PnL was pinned at 0.0, the dashboard's mark-to-market equity
+        only ever moved on close, and both equity-based halts evaluated
+        realized PnL only (see ADR-0010).
+
+        That was justified by symmetry with close_position(), which IS
+        deliberately unimplemented offline — but those are different
+        contracts. Reading positions is safe in any mode; flattening one by
+        broker id is what has no offline implementation.
+
+        Returns fresh dataclass copies, not the live objects: a caller
+        mutating a returned trade must not be able to rewrite this adapter's
+        idea of its own open positions.
+        """
+        return [replace(trade) for trade in self._open_trades.values()]
 
     async def check_tp_sl(self, symbol, current_price: float) -> list[ExecutedTrade]:
         """Offline-mode-only: live mode's TP/SL are real bracket orders

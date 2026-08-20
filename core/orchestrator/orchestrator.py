@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from swarm_trading.core.config import settings
-from swarm_trading.core.models import AgentType, ExecutedTrade, MarketState, Side, Symbol
+from swarm_trading.core.models import AgentType, ExecutedTrade, MarketState, OrderStatus, Side, Symbol
 from swarm_trading.risk.engine.risk_engine import RiskEngine
 
 JSONDict = dict[str, Any]
@@ -187,7 +187,45 @@ class SwarmOrchestrator:
 
             # Send to broker
             trade = await self._broker.execute(proposal)
+
+            # Only a FILLED order is a position. A REJECTED one (fill
+            # timeout, or a notional too small to buy one whole unit — see
+            # IBKRBroker._reject_insufficient_notional) must not consume a
+            # concentration slot, must not be persisted as an open trade,
+            # and must not be announced as one.
+            #
+            # on_order_opened() used to fire unconditionally here, which
+            # leaked a slot per rejected order permanently: nothing ever
+            # closes a rejected trade, so on_trade_closed() never runs to
+            # decrement it, and SYMBOL_CONCENTRATION drifts toward blocking
+            # the symbol outright. That was already reachable via the fill
+            # timeout; the new rejection path would have made it routine.
+            if trade.status != OrderStatus.FILLED:
+                logger.warning(
+                    f"[{agent.agent_id}] ORDER NOT FILLED: status={trade.status.value} "
+                    f"{proposal.side.value} {proposal.symbol.value}"
+                )
+                return
+
             self._risk.on_order_opened(proposal)
+            # Persisted at open, not only at close: an open paper position
+            # that only exists in the broker's in-memory registry vanishes
+            # silently on restart, taking its pending result with it. The
+            # row lands with closed_at=NULL and pnl=0.0, and the same
+            # trade_id is updated in place when the trade closes (save_trade
+            # upserts on trade_id).
+            #
+            # AWAITED, unlike the close-side write in
+            # on_trade_closed_callback(): here the broker has already filled,
+            # so a real position exists that nothing else records. Deferring
+            # this write leaves a window — fill, position live, write still
+            # queued, process dies — in which the position is unrecoverable
+            # on restart. Awaiting shrinks that window to the write itself.
+            # save_trade() swallows its own exceptions (see AsyncRepository),
+            # so a dead Postgres still cannot take the swarm down; it just
+            # means this tick waits for the attempt to finish.
+            if self._repository:
+                await self._repository.save_trade(trade)
             logger.info(f"[{agent.agent_id}] ORDER SENT: {trade.side.value} {trade.symbol.value} @ {trade.entry_price}")
             await self._broadcast({"type": "trade_opened", "data": _trade_payload(trade)})
 
