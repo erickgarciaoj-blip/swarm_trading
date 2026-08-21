@@ -10,7 +10,12 @@ from typing import Any
 import pytest
 
 import swarm_trading.brokers.ibkr.ibkr_broker as ibkr_broker_module
-from swarm_trading.brokers.ibkr.ibkr_broker import IBKRBroker, get_front_month
+from swarm_trading.brokers.ibkr.ibkr_broker import (
+    IBKRBroker,
+    get_front_month,
+    resolve_order_quantity,
+    unit_notional_usd,
+)
 from swarm_trading.core.config import settings
 from swarm_trading.core.models import OrderProposal, OrderStatus, Side, Symbol
 
@@ -57,15 +62,26 @@ async def broker(monkeypatch):
     return b
 
 
-def _proposal(side=Side.LONG) -> OrderProposal:
+def _proposal(side=Side.LONG, quantity=3900.0, price=1950.0) -> OrderProposal:
+    """A *placeable* proposal: $3,900 of notional at $1,950/oz resolves to 2
+    whole ounces of XAUUSD.
+
+    The previous defaults (quantity=0.05, price=1.0 from the dataclass) only
+    ever reached the broker because resolve_order_quantity() applied a
+    `max(1, ...)` floor — 0.05 units became 1. Now that the floor is gone
+    (an unplaceable notional is rejected instead of silently rounded up to a
+    full contract), these live-path tests need a notional that genuinely
+    covers at least one unit, which is what they always meant to exercise.
+    """
     return OrderProposal(
         agent_id="swing_XAUUSD_test1234",
         symbol=Symbol.XAUUSD,
         side=side,
-        quantity=0.05,
+        quantity=quantity,
         sl_price=1900.0,
         tp_price=2000.0,
         confidence=0.8,
+        price=price,
         reason="unit-test",
     )
 
@@ -161,8 +177,53 @@ async def test_offline_execute_fills_immediately_at_proposal_price():
 
 
 @pytest.mark.asyncio
-async def test_offline_get_open_positions_is_empty():
+async def test_offline_get_open_positions_reports_nothing_before_any_trade():
     broker = IBKRBroker(offline=True)
+    assert await broker.get_open_positions() == []
+
+
+@pytest.mark.asyncio
+async def test_offline_broker_reports_open_positions():
+    """Offline used to hard-code [] here, hiding real paper positions from
+    the orchestrator's floating-PnL calculation. Opening two trades must now
+    surface both."""
+    broker = IBKRBroker(offline=True)
+    await _offline_open(broker, symbol=Symbol.XAUUSD, price=1950.0, quantity=30.0)
+    await _offline_open(broker, symbol=Symbol.OIL, price=80.0, sl_price=78.0, tp_price=84.0, quantity=30.0)
+
+    positions = await broker.get_open_positions()
+
+    assert len(positions) == 2
+    assert {p.symbol for p in positions} == {Symbol.XAUUSD, Symbol.OIL}
+    assert all(p.status == OrderStatus.FILLED for p in positions)
+    assert all(p.closed_at is None for p in positions)
+
+
+@pytest.mark.asyncio
+async def test_offline_get_open_positions_does_not_expose_internal_state():
+    """Callers get copies: mutating a returned trade, or the returned list,
+    must not rewrite the adapter's own view of what is open."""
+    broker = IBKRBroker(offline=True)
+    trade_id = await _offline_open(broker, price=1950.0, quantity=30.0)
+
+    positions = await broker.get_open_positions()
+    positions[0].pnl = 999.0
+    positions.clear()
+
+    assert len(broker._open_trades) == 1
+    assert broker._open_trades[trade_id].pnl == 0.0
+
+
+@pytest.mark.asyncio
+async def test_offline_closed_position_leaves_open_positions():
+    """check_tp_sl() and get_open_positions() must agree on what is open."""
+    broker = IBKRBroker(offline=True)
+    await _offline_open(broker, side=Side.LONG, price=1950.0, sl_price=1900.0, tp_price=2000.0, quantity=30.0)
+
+    assert len(await broker.get_open_positions()) == 1
+    closed = await broker.check_tp_sl(Symbol.XAUUSD, 2000.0)
+
+    assert len(closed) == 1
     assert await broker.get_open_positions() == []
 
 
@@ -347,3 +408,109 @@ async def test_connect_runs_client_connect_off_the_event_loop(monkeypatch):
     assert fake_client.connect_calls == [(settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)]
     assert fake_client.connect_thread_name is not None
     assert fake_client.connect_thread_name != event_loop_thread_name
+
+
+# ─── Fase 0: insufficient-notional sizing must not round up ──────────────────
+# resolve_order_quantity() used to end every branch in `max(1, int(...))`,
+# which turned any notional too small for one unit into a full position. On
+# NAS100 that floor meant a $30 order became one NQ contract — ~$584k of
+# exposure. These lock the floor out for every instrument family the map
+# covers: FUT via point value (NQ, CL), CMDTY per ounce (XAUUSD), STK per
+# share (PLTR).
+
+
+@pytest.mark.parametrize(
+    ("symbol", "price", "unit_label", "expected_unit_notional"),
+    [
+        ("NAS100", 29236.1113, "NQ contract", 29236.1113 * 20.0),
+        ("US100", 29236.1113, "NQ contract", 29236.1113 * 20.0),
+        ("OIL", 86.69, "CL contract", 86.69 * 1000.0),
+        ("XAUUSD", 4575.7998, "ounce", 4575.7998),
+        ("PLTR", 174.87, "share", 174.87),
+    ],
+)
+def test_notional_below_minimum_unit_is_not_rounded_up(symbol, price, unit_label, expected_unit_notional):
+    """A $30 notional buys less than one unit of every instrument here, so
+    every one of them must resolve to 0 rather than to 1."""
+    assert unit_notional_usd(symbol, price) == pytest.approx(expected_unit_notional)
+    # $30 is the real per-trade notional the swarm currently produces
+    # (equity $1,000 x risk_min_entry_pct 0.03).
+    assert resolve_order_quantity(symbol, 30.0, price) == 0, f"$30 must not become a whole {unit_label}"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "price", "notional", "expected_units"),
+    [
+        # Exactly one unit, and just under/over it.
+        ("NAS100", 29236.1113, 29236.1113 * 20.0, 1),
+        ("NAS100", 29236.1113, 29236.1113 * 20.0 - 0.01, 0),
+        ("NAS100", 29236.1113, 29236.1113 * 20.0 * 2.7, 2),
+        ("OIL", 86.69, 86_690.0, 1),
+        ("OIL", 86.69, 86_689.99, 0),
+        ("XAUUSD", 4575.7998, 4575.7998, 1),
+        ("XAUUSD", 4575.7998, 4575.79, 0),
+        ("XAUUSD", 4575.7998, 10_000.0, 2),
+        ("PLTR", 174.87, 174.87, 1),
+        ("PLTR", 174.86, 174.87, 1),
+        ("PLTR", 174.87, 174.86, 0),
+        ("PLTR", 174.87, 1_000.0, 5),
+    ],
+)
+def test_resolve_order_quantity_truncates_to_whole_units(symbol, price, notional, expected_units):
+    assert resolve_order_quantity(symbol, notional, price) == expected_units
+
+
+@pytest.mark.parametrize(("notional", "price"), [(30.0, 0.0), (30.0, -1.0), (0.0, 1950.0), (-30.0, 1950.0)])
+def test_resolve_order_quantity_is_zero_for_degenerate_inputs(notional, price):
+    """A missing/zero reference price must not divide by zero or produce a
+    negative order size."""
+    assert resolve_order_quantity("XAUUSD", notional, price) == 0
+
+
+@pytest.mark.asyncio
+async def test_ibkr_execute_does_not_place_order_when_notional_is_insufficient(broker):
+    """The live path must reject before placeOrder(), leaving no order ids
+    claimed, no bracket half-transmitted, and no tracked position."""
+    proposal = _proposal(quantity=30.0, price=1950.0)  # $30 < $1,950 for 1 oz
+
+    trade = await broker.execute(proposal)
+
+    assert trade.status == OrderStatus.REJECTED
+    assert broker._client.placed == {}
+    assert broker._client.cancelled == []
+    assert broker._open_trades == {}
+    assert broker._child_order_ids == {}
+    # Order ids are only consumed by orders actually sent.
+    assert broker._next_order_id == 1
+    # The proposal's own notional is preserved for the audit trail.
+    assert trade.quantity == 30.0
+    assert trade.entry_price == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("symbol", "price"), [(Symbol.NAS100, 29236.11), (Symbol.OIL, 86.69), (Symbol.PLTR, 174.87)])
+async def test_ibkr_execute_rejects_insufficient_notional_across_instruments(broker, symbol, price):
+    proposal = _proposal(quantity=30.0, price=price)
+    proposal.symbol = symbol
+
+    trade = await broker.execute(proposal)
+
+    assert trade.status == OrderStatus.REJECTED
+    assert broker._client.placed == {}
+
+
+@pytest.mark.asyncio
+async def test_ibkr_execute_still_places_order_when_notional_is_sufficient(broker):
+    """The guard must not block legitimately-sized orders — the regression
+    that would make this whole change a denial of service."""
+    import asyncio
+
+    task = asyncio.ensure_future(broker.execute(_proposal(quantity=3900.0, price=1950.0)))
+    await asyncio.sleep(0)
+    parent_id = min(broker._client.placed.keys())
+    broker._on_order_status(parent_id, "Filled", 1950.0)
+    trade = await task
+
+    assert trade.status == OrderStatus.FILLED
+    assert len(broker._client.placed) == 3  # parent + TP + SL
+    assert trade.quantity == 2  # 2 whole ounces, not the $3,900 notional

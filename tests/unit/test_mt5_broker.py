@@ -16,8 +16,8 @@ from typing import Any
 import pytest
 
 import swarm_trading.brokers.mt5.mt5_broker as mt5_broker_module
-from swarm_trading.brokers.mt5.mt5_broker import MT5Broker
-from swarm_trading.core.models import OrderProposal, OrderStatus, Side, Symbol
+from swarm_trading.brokers.mt5.mt5_broker import LOT_SIZING_DISABLED_MSG, MT5Broker
+from swarm_trading.core.models import OrderProposal, Side, Symbol
 
 
 class _FakeMT5:
@@ -115,29 +115,59 @@ async def test_disconnect_runs_shutdown_off_the_event_loop(fake_mt5):
     assert fake_mt5.call_threads["shutdown"] != event_loop_thread
 
 
+# ─── Fase 0: live execution is disabled until lot sizing is safe ──────────
+# These replace the previous test_execute_places_order_off_the_event_loop /
+# test_execute_marks_rejected_on_bad_retcode pair, which asserted that
+# execute() reached mt5.order_send(). It deliberately no longer does; the
+# ADR-0002 off-the-event-loop coverage for order_send returns together with
+# execute() itself, once symbol_info()-backed lot conversion exists.
+
+
 @pytest.mark.asyncio
-async def test_execute_places_order_off_the_event_loop(fake_mt5):
-    event_loop_thread = threading.current_thread().name
+async def test_mt5_execute_is_disabled_until_safe_lot_sizing_exists(fake_mt5):
+    """execute() must fail closed: no order reaches the terminal, and the
+    reason names lot sizing explicitly rather than failing generically."""
     fake_mt5.order_send_result = type("Result", (), {"retcode": _FakeMT5.TRADE_RETCODE_DONE, "order": 555})()
-
     broker = MT5Broker()
-    trade = await broker.execute(_proposal(side=Side.LONG))
 
-    assert trade.status == OrderStatus.FILLED
-    assert trade.trade_id == "555"
-    assert trade.entry_price == 1950.5  # ask price for a LONG
-    assert fake_mt5.call_threads["symbol_info_tick"] != event_loop_thread
-    assert fake_mt5.call_threads["order_send"] != event_loop_thread
+    with pytest.raises(NotImplementedError) as excinfo:
+        await broker.execute(_proposal(side=Side.LONG))
+
+    message = str(excinfo.value)
+    assert LOT_SIZING_DISABLED_MSG in message
+    # The operator reading this traceback must be able to tell *why* it is
+    # disabled, not just that it is.
+    assert "LOTS" in message
+    assert "USD-notional" in message
+
+    # Nothing was sent, and nothing was even quoted for.
+    assert "order_send" not in fake_mt5.call_threads
+    assert "symbol_info_tick" not in fake_mt5.call_threads
 
 
 @pytest.mark.asyncio
-async def test_execute_marks_rejected_on_bad_retcode(fake_mt5):
-    fake_mt5.order_send_result = type("Result", (), {"retcode": 99999, "order": 0})()
-
+async def test_mt5_execute_stays_disabled_even_when_terminal_is_available(fake_mt5):
+    """The guard is not a stand-in for the "MT5 not installed on this OS"
+    RuntimeError — it fires first, so a real Windows host with a live
+    terminal is blocked too. That host is exactly the dangerous case."""
     broker = MT5Broker()
-    trade = await broker.execute(_proposal())
+    broker._connected = True
 
-    assert trade.status == OrderStatus.REJECTED
+    with pytest.raises(NotImplementedError):
+        await broker.execute(_proposal())
+
+    assert fake_mt5.call_threads == {}
+
+
+@pytest.mark.asyncio
+async def test_mt5_execute_disabled_guard_precedes_availability_check(monkeypatch):
+    """With MT5_AVAILABLE False the old code raised RuntimeError. The sizing
+    guard must win, so the failure reason stays accurate on every platform."""
+    monkeypatch.setattr(mt5_broker_module, "MT5_AVAILABLE", False)
+    broker = MT5Broker()
+
+    with pytest.raises(NotImplementedError):
+        await broker.execute(_proposal())
 
 
 @pytest.mark.asyncio
@@ -172,13 +202,11 @@ async def test_get_open_positions_maps_mt5_positions_off_the_event_loop(fake_mt5
     assert fake_mt5.call_threads["positions_get"] != event_loop_thread
 
 
-@pytest.mark.asyncio
-async def test_execute_raises_when_mt5_unavailable(monkeypatch):
-    monkeypatch.setattr(mt5_broker_module, "MT5_AVAILABLE", False)
-    broker = MT5Broker()
-
-    with pytest.raises(RuntimeError):
-        await broker.execute(_proposal())
+# test_execute_raises_when_mt5_unavailable was removed here: execute() now
+# raises NotImplementedError (a RuntimeError subclass) from the sizing guard
+# before ever reaching _require_mt5(), so the assertion still passed but no
+# longer proved what its name claimed. Replaced by
+# test_mt5_execute_disabled_guard_precedes_availability_check above.
 
 
 @pytest.mark.asyncio

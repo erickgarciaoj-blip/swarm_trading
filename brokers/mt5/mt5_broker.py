@@ -6,6 +6,12 @@ MetaTrader5 (the PyPI package) only ships Windows wheels — there is no
 macOS/Linux build. Importing it is wrapped in try/except so this module (and
 therefore main.py/swarm_factory.py) stays importable on any OS; on Mac, run
 with app_env != "live" so IBKRBroker (paper trading) is used instead.
+
+STATUS: execute() is deliberately DISABLED and raises NotImplementedError
+on every call — see _require_safe_lot_sizing() and LOT_SIZING_DISABLED_MSG.
+Order sizing here would send USD-notional into MT5's lot-denominated
+`volume` field. connect()/disconnect()/get_open_positions() are unaffected;
+only order placement is blocked.
 """
 
 from __future__ import annotations
@@ -32,6 +38,17 @@ from swarm_trading.core.models import (
     Side,
 )
 
+# Raised by every MT5Broker.execute() call while USD-notional → lot-size
+# conversion is unimplemented. Kept as a module constant so tests assert on
+# the real message instead of duplicating a copy of it.
+LOT_SIZING_DISABLED_MSG = (
+    "MT5 live execution is disabled: OrderProposal.quantity is USD-notional, but MT5's "
+    "order `volume` field is LOTS. Converting one to the other safely requires "
+    "symbol_info() contract_size/volume_min/volume_step plus a margin check, which is "
+    "not implemented yet. Refusing to send an order rather than risk a wrong-by-orders-"
+    "of-magnitude position size."
+)
+
 # Symbol map: internal symbol → MT5 symbol name
 MT5_SYMBOL_MAP = {
     "XAUUSD": "XAUUSD",
@@ -52,6 +69,27 @@ class MT5Broker(BrokerInterface):
                 "[MT5] MetaTrader5 no disponible en este OS — solo soporta Windows. "
                 "En Mac usa modo paper_offline (IBKRBroker)."
             )
+
+    def _require_safe_lot_sizing(self, proposal: OrderProposal) -> None:
+        """Hard gate on live MT5 execution — see LOT_SIZING_DISABLED_MSG.
+
+        `OrderProposal.quantity` carries USD-notional (see
+        BaseAgent.calc_notional), but MT5's order request field `volume`
+        means *lots*. Sending one as the other is not an approximation, it
+        is a unit error of several orders of magnitude: a $30 notional
+        becomes 30 lots, which for XAUUSD (100 oz/lot) is roughly $13.7M of
+        exposure backed by an agent holding $1,000.
+
+        Re-enabling this requires a real conversion validated against
+        mt5.symbol_info(): trade_contract_size, volume_min, volume_max,
+        volume_step, plus a margin check. Until that exists, every call
+        raises here rather than sending a partially-correct order — a
+        wrong-by-1000x fill is far worse than a failed run.
+        """
+        raise NotImplementedError(
+            f"{LOT_SIZING_DISABLED_MSG} (agent={proposal.agent_id} symbol={proposal.symbol.value} "
+            f"requested_notional_usd={proposal.quantity})"
+        )
 
     async def connect(self) -> bool:
         if not MT5_AVAILABLE:
@@ -84,6 +122,11 @@ class MT5Broker(BrokerInterface):
             pass
 
     async def execute(self, proposal: OrderProposal) -> ExecutedTrade:
+        # FAIL CLOSED — see _require_safe_lot_sizing()'s docstring. Checked
+        # before _require_mt5() and before any mt5.* call, so no code path
+        # here can reach mt5.order_send() while the sizing conversion is
+        # missing, regardless of OS or terminal availability.
+        self._require_safe_lot_sizing(proposal)
         self._require_mt5()
         mt5_symbol = MT5_SYMBOL_MAP.get(proposal.symbol.value, proposal.symbol.value)
         order_type = mt5.ORDER_TYPE_BUY if proposal.side == Side.LONG else mt5.ORDER_TYPE_SELL
