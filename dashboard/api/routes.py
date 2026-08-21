@@ -188,7 +188,12 @@ def _build_snapshot() -> dict[str, Any]:
             "agent_id": t.agent_id,
             "symbol": t.symbol.value,
             "side": t.side.value,
+            # pnl is NET of transaction costs; gross and the drag are shown
+            # alongside it so a green trade that lost money after costs is
+            # visible as such (see core.models.ExecutedTrade).
             "pnl": round(t.pnl, 4),
+            "gross_pnl": round(t.gross_pnl, 4),
+            "total_costs": round(t.total_costs, 4),
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
         }
         for t in _orchestrator._risk.recent_trades

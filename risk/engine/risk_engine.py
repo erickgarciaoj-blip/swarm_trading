@@ -82,6 +82,12 @@ class RiskEngine:
         # display) — no longer what the total-loss halt evaluates against;
         # see update_daily_tracking()'s total_drawdown calculation instead.
         self._total_pnl: float = 0.0
+        # Cost-model aggregates (Fase 1A). Realized only, informational:
+        # every halt still evaluates NET equity, never these. Kept so the
+        # dashboard can show what the swarm earned before costs versus what
+        # it kept — the difference is the whole point of the cost model.
+        self._gross_pnl: float = 0.0
+        self._total_costs: float = 0.0
         self._open_positions_by_symbol: dict[Symbol, int] = defaultdict(int)
         self._last_reset: datetime = datetime.utcnow()
         # Newest first — the single global choke point every closed trade
@@ -168,8 +174,19 @@ class RiskEngine:
         logger.debug(f"[RiskEngine] +1 open on {proposal.symbol.value} by {proposal.agent_id}")
 
     def on_trade_closed(self, trade: ExecutedTrade) -> None:
-        self._daily_pnl += trade.pnl - trade.commission
+        # Both accumulators take `trade.pnl` unchanged: it is already NET of
+        # commission, spread and slippage (see ExecutedTrade's docstring).
+        #
+        # This previously read `_daily_pnl += trade.pnl - trade.commission`
+        # while `_total_pnl += trade.pnl`, which was both a double charge
+        # (once pnl became net) and an asymmetry between the two figures —
+        # they would drift apart the moment any adapter reported a fee.
+        # Gross and cost totals are tracked separately below so the drag
+        # stays visible instead of being folded away.
+        self._daily_pnl += trade.pnl
         self._total_pnl += trade.pnl
+        self._gross_pnl += trade.gross_pnl
+        self._total_costs += trade.total_costs
         symbol = trade.symbol
         if self._open_positions_by_symbol[symbol] > 0:
             self._open_positions_by_symbol[symbol] -= 1
@@ -379,10 +396,21 @@ class RiskEngine:
 
     @property
     def total_pnl(self) -> float:
-        """Realized PnL only, for display — NOT what the total-loss halt
+        """Realized NET PnL, for display — NOT what the total-loss halt
         evaluates (see update_daily_tracking's total_drawdown, which uses
         full equity including floating PnL)."""
         return self._total_pnl
+
+    @property
+    def gross_pnl(self) -> float:
+        """Realized PnL BEFORE transaction costs. Paired with total_costs:
+        gross_pnl - total_costs == total_pnl."""
+        return self._gross_pnl
+
+    @property
+    def total_costs(self) -> float:
+        """Commission + spread + slippage charged on realized trades."""
+        return self._total_costs
 
     @property
     def recent_trades(self) -> list[ExecutedTrade]:
