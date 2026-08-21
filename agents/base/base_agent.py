@@ -90,7 +90,13 @@ class BaseAgent(ABC):
         self._total_trades += 1
         if trade.pnl > 0:
             self._wins += 1
-        self.update_equity(self.equity + trade.pnl - trade.commission)
+        # `trade.pnl` is NET of every cost, commission included (see
+        # ExecutedTrade's docstring). This used to read
+        # `+ trade.pnl - trade.commission`, which was correct only while pnl
+        # was gross; subtracting again now would charge commission twice.
+        # Win rate above counts NET winners on purpose: a trade whose gross
+        # profit is smaller than its costs did not make money.
+        self.update_equity(self.equity + trade.pnl)
 
     def get_metrics(self) -> AgentMetrics:
         win_rate = self._wins / self._total_trades if self._total_trades else 0.0

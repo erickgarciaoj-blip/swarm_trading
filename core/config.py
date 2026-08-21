@@ -3,6 +3,8 @@
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from swarm_trading.core.costs import DEFAULT_COST_BOOK, InstrumentCosts
+
 # app_env values that mean "trading real or paper capital, unattended" — as
 # opposed to "development", where a throwaway local SQLite file is fine.
 _PRODUCTION_LIKE_ENVS = frozenset({"paper", "live"})
@@ -56,6 +58,21 @@ class SwarmSettings(BaseSettings):
     risk_news_blackout_min: int = 5
     risk_min_entry_pct: float = 0.03
     risk_max_entry_pct: float = 0.15
+
+    # Transaction costs (paper trading fidelity — see core/costs.py)
+    # Per-instrument, never a single universal number: the same basis-point
+    # figure means very different things on OIL (~86) and NAS100 (~29,000),
+    # and the instruments are quoted and charged differently.
+    #
+    # Defaults come from costs.DEFAULT_COST_BOOK and are ILLUSTRATIVE
+    # PLACEHOLDERS, not measured market data — calibrate them against the
+    # real broker before trusting any profitability figure. Override per
+    # instrument with an INSTRUMENT_COSTS env var holding JSON, e.g.
+    #   INSTRUMENT_COSTS='{"OIL": {"spread_bps": 2.0, "slippage_bps": 0.8,
+    #                              "commission_bps": 0.1}}'
+    # Set every instrument to zero to reproduce pre-cost (legacy) results
+    # exactly — see costs.CostBook.zero().
+    instrument_costs: dict[str, InstrumentCosts] = Field(default_factory=lambda: dict(DEFAULT_COST_BOOK))
 
     # Dashboard
     dashboard_host: str = "0.0.0.0"

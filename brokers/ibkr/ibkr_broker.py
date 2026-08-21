@@ -39,6 +39,7 @@ except ImportError:
 
 from swarm_trading.brokers.adapters.broker_interface import BrokerInterface
 from swarm_trading.core.config import settings
+from swarm_trading.core.costs import CostBook, compute_costed_pnl, entry_cost_usd, entry_fill_price
 from swarm_trading.core.models import ExecutedTrade, OrderProposal, OrderStatus, Side
 
 
@@ -193,11 +194,17 @@ else:
 class IBKRBroker(BrokerInterface):
     """Paper/live trading adapter for Interactive Brokers via ibapi."""
 
-    def __init__(self, offline: bool = False):
+    def __init__(self, offline: bool = False, cost_book: CostBook | None = None):
         # offline=True never touches ibapi/TWS at all — every call is
         # simulated in-process. Lets main.py run end-to-end (100 agents,
         # dashboard, etc.) without a TWS/Gateway instance or ibapi installed.
         self._offline = offline
+        # Transaction costs applied to simulated fills (offline only — a live
+        # fill's costs are whatever IBKR actually charged, not a model).
+        # Injectable so tests pin deterministic rates instead of inheriting
+        # whatever the deployment happens to be configured with; defaults to
+        # settings.instrument_costs.
+        self._costs = cost_book if cost_book is not None else CostBook(settings.instrument_costs)
         self._client = _IBClient(self) if (IBKR_AVAILABLE and not offline) else None
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -273,12 +280,24 @@ class IBKRBroker(BrokerInterface):
 
     async def execute(self, proposal: OrderProposal) -> ExecutedTrade:
         if self._offline:
+            # entry_price keeps the REFERENCE price the strategy acted on;
+            # entry_fill_price is what the position actually opened at after
+            # crossing the spread and slipping. Keeping both is what lets a
+            # closed trade be re-derived later (see ExecutedTrade's
+            # docstring). A LONG's fill is worse (higher) than the
+            # reference, a SHORT's is worse (lower) — never better.
+            instrument_costs = self._costs.for_symbol(proposal.symbol.value)
             trade = ExecutedTrade(
                 trade_id=str(uuid.uuid4()),
                 agent_id=proposal.agent_id,
                 symbol=proposal.symbol,
                 side=proposal.side,
                 entry_price=proposal.price,
+                entry_fill_price=entry_fill_price(proposal.price, proposal.side, instrument_costs),
+                # Already sunk the moment the position opens, so it is
+                # recorded now rather than only at close — that is what lets
+                # floating PnL be net of what getting in actually cost.
+                entry_costs=entry_cost_usd(proposal.quantity, instrument_costs),
                 quantity=proposal.quantity,
                 sl_price=proposal.sl_price,
                 tp_price=proposal.tp_price,
@@ -471,14 +490,24 @@ class IBKRBroker(BrokerInterface):
                 continue
 
             exit_price = trade.tp_price if hit_tp else trade.sl_price
-            direction = 1 if trade.side == Side.LONG else -1
             # trade.quantity is USD-notional (see BaseAgent.calc_notional), not a
             # unit count — pnl must scale with the *percentage* move, not the raw
             # price delta. Using a raw delta here previously blew up NAS100/US100
             # (quoted in thousands of index points) out of all proportion to the
             # $ actually at risk, while barely registering on XAUUSD/OIL.
-            pct_change = (exit_price - trade.entry_price) / trade.entry_price
-            pnl = trade.quantity * pct_change * direction
+            #
+            # compute_costed_pnl() keeps that percentage-of-notional model and
+            # decomposes it: gross from the reference prices, then spread,
+            # slippage and commission charged on both legs. With the
+            # instrument configured at zero cost it reduces to the previous
+            # formula bit-for-bit.
+            result = compute_costed_pnl(
+                notional_usd=trade.quantity,
+                reference_entry_price=trade.entry_price,
+                reference_exit_price=exit_price,
+                side=trade.side,
+                costs=self._costs.for_symbol(trade.symbol.value),
+            )
 
             closed_trade = ExecutedTrade(
                 trade_id=trade.trade_id,
@@ -486,11 +515,18 @@ class IBKRBroker(BrokerInterface):
                 symbol=trade.symbol,
                 side=trade.side,
                 entry_price=trade.entry_price,
+                entry_fill_price=result.entry_fill_price,
                 quantity=trade.quantity,
                 sl_price=trade.sl_price,
                 tp_price=trade.tp_price,
                 status=OrderStatus.FILLED,
-                pnl=pnl,
+                pnl=result.net_pnl,
+                gross_pnl=result.gross_pnl,
+                entry_costs=result.entry_costs,
+                exit_costs=result.exit_costs,
+                commission=result.commission,
+                exit_price=exit_price,
+                exit_fill_price=result.exit_fill_price,
                 opened_at=trade.opened_at,
                 closed_at=datetime.utcnow(),
             )
@@ -498,7 +534,9 @@ class IBKRBroker(BrokerInterface):
             closed.append(closed_trade)
             logger.info(
                 f"[IBKR] OFFLINE {'TP' if hit_tp else 'SL'} hit: {trade.symbol.value} "
-                f"@ {exit_price} | pnl={pnl:+.4f} | agent={trade.agent_id}"
+                f"@ {exit_price} (fill {result.exit_fill_price:.5f}) | "
+                f"gross={result.gross_pnl:+.4f} costs={result.total_costs:.4f} "
+                f"net={result.net_pnl:+.4f} | agent={trade.agent_id}"
             )
 
         return closed

@@ -56,6 +56,14 @@ def _trade_to_dict(row: TradeORM) -> JSONDict:
         "sl_price": row.sl_price,
         "tp_price": row.tp_price,
         "pnl": row.pnl,
+        "gross_pnl": row.gross_pnl,
+        "entry_costs": row.entry_costs,
+        "exit_costs": row.exit_costs,
+        "total_costs": row.entry_costs + row.exit_costs,
+        "commission": row.commission,
+        "entry_fill_price": row.entry_fill_price,
+        "exit_price": row.exit_price,
+        "exit_fill_price": row.exit_fill_price,
         "status": row.status,
         "opened_at": row.opened_at.isoformat() if row.opened_at else None,
         "closed_at": row.closed_at.isoformat() if row.closed_at else None,
@@ -146,6 +154,13 @@ class AsyncRepository:
                 "sl_price": trade.sl_price,
                 "tp_price": trade.tp_price,
                 "pnl": trade.pnl,
+                "gross_pnl": trade.gross_pnl,
+                "entry_costs": trade.entry_costs,
+                "exit_costs": trade.exit_costs,
+                "commission": trade.commission,
+                "entry_fill_price": trade.entry_fill_price,
+                "exit_price": trade.exit_price,
+                "exit_fill_price": trade.exit_fill_price,
                 "status": trade.status.value,
                 "opened_at": trade.opened_at,
                 "closed_at": trade.closed_at,
@@ -246,6 +261,8 @@ class AsyncRepository:
             equity = initial_capital
             curve: list[JSONDict] = []
             for row in rows:
+                # row.pnl is NET of transaction costs; costs must not be
+                # subtracted again here (see ExecutedTrade's docstring).
                 equity += row.pnl
                 # closed_at is guaranteed non-null by the WHERE clause above —
                 # mypy can't see that from the SQL filter alone.

@@ -21,6 +21,7 @@ import pytest
 
 from swarm_trading.agents.base.base_agent import BaseAgent
 from swarm_trading.brokers.ibkr.ibkr_broker import IBKRBroker
+from swarm_trading.core.costs import CostBook
 from swarm_trading.core.models import (
     AgentType,
     Candle,
@@ -352,7 +353,7 @@ async def test_orchestrator_floating_pnl_uses_offline_open_positions():
     """With the offline broker reporting its open trades, an unrealized move
     must produce non-zero floating PnL. Before Fase 0 this was pinned at 0.0
     because get_open_positions() returned [] in offline mode."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     orch = SwarmOrchestrator(broker=broker, market_feed=None, news_feed=None)
     agent = _FixedAgent()
     orch.register_agent(agent)
@@ -377,7 +378,7 @@ async def test_orchestrator_floating_pnl_uses_offline_open_positions():
 @pytest.mark.asyncio
 async def test_floating_pnl_is_signed_by_side():
     """A LONG losing and a SHORT gaining on the same downward move."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     orch = SwarmOrchestrator(broker=broker, market_feed=None, news_feed=None)
 
     for side, agent_id in ((Side.LONG, "long-agent"), (Side.SHORT, "short-agent")):
@@ -405,7 +406,7 @@ async def test_floating_pnl_is_signed_by_side():
 async def test_total_equity_includes_floating_pnl_from_offline_positions():
     """The halt machinery reads _compute_total_equity(); it must now see
     unrealized moves, which is the whole point of surfacing open positions."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     orch = SwarmOrchestrator(broker=broker, market_feed=None, news_feed=None)
     agent = _FixedAgent()
     orch.register_agent(agent)

@@ -40,7 +40,22 @@ class TradeORM(Base):
     quantity: Mapped[float] = mapped_column(Float)
     sl_price: Mapped[float] = mapped_column(Float)
     tp_price: Mapped[float] = mapped_column(Float)
+    # NET of all transaction costs — see core.models.ExecutedTrade's
+    # docstring. Existing rows predate the cost model and were written when
+    # this column held a gross figure with zero costs, which is the same
+    # number: gross_pnl/entry_costs/exit_costs default to 0.0 for them, so
+    # the invariant pnl == gross_pnl - costs still holds on historical rows.
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    gross_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    entry_costs: Mapped[float] = mapped_column(Float, default=0.0)
+    exit_costs: Mapped[float] = mapped_column(Float, default=0.0)
+    # Commission component of entry_costs + exit_costs. Already inside pnl.
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    # Effective transacted prices, kept alongside the reference prices above
+    # so a closed trade can be re-derived and audited after the fact.
+    entry_fill_price: Mapped[float] = mapped_column(Float, default=0.0)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String)
     opened_at: Mapped[datetime] = mapped_column(DateTime)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

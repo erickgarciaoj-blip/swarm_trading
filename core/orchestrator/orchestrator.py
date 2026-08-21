@@ -38,6 +38,12 @@ def _trade_payload(trade: ExecutedTrade) -> JSONDict:
         "tp_price": trade.tp_price,
         "status": trade.status.value,
         "pnl": trade.pnl,
+        "gross_pnl": trade.gross_pnl,
+        "total_costs": trade.total_costs,
+        "commission": trade.commission,
+        "entry_fill_price": trade.entry_fill_price,
+        "exit_price": trade.exit_price,
+        "exit_fill_price": trade.exit_fill_price,
         "opened_at": trade.opened_at.isoformat(),
         "closed_at": trade.closed_at.isoformat() if trade.closed_at else None,
     }
@@ -295,7 +301,15 @@ class SwarmOrchestrator:
                 continue
             direction = 1 if trade.side == Side.LONG else -1
             pct_change = (price - trade.entry_price) / trade.entry_price
-            floating[trade.agent_id] = floating.get(trade.agent_id, 0.0) + trade.quantity * pct_change * direction
+            unrealized_gross = trade.quantity * pct_change * direction
+            # Net of the entry cost, which is already sunk (recorded by the
+            # broker at open). The EXIT cost is deliberately not estimated
+            # here: the position has not closed, so charging a modelled exit
+            # would be a forecast, and would double-charge against the real
+            # figure compute_costed_pnl() produces on close. Expect a closing
+            # trade's realized PnL to land below its last floating value by
+            # roughly one exit leg's cost.
+            floating[trade.agent_id] = floating.get(trade.agent_id, 0.0) + unrealized_gross - trade.entry_costs
         return floating
 
     def floating_pnl_for(self, agent_id: str) -> float:
@@ -338,6 +352,13 @@ class SwarmOrchestrator:
             "retired_agents": retired_count,
             "avg_win_rate": round(avg_win_rate, 4),
             "daily_pnl": round(self._risk.daily_pnl, 4),
+            # Realized only, and the three are one identity:
+            #   realized_gross_pnl - realized_costs == realized_net_pnl
+            # Net is what equity above already reflects; the other two exist
+            # so the cost drag is visible instead of silently folded in.
+            "realized_gross_pnl": round(self._risk.gross_pnl, 4),
+            "realized_costs": round(self._risk.total_costs, 4),
+            "realized_net_pnl": round(self._risk.total_pnl, 4),
             "is_halted": self._risk.is_halted,
             "halt_cause": self._risk.halt_cause,
         }

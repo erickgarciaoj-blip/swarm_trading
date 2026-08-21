@@ -17,6 +17,7 @@ from swarm_trading.brokers.ibkr.ibkr_broker import (
     unit_notional_usd,
 )
 from swarm_trading.core.config import settings
+from swarm_trading.core.costs import CostBook
 from swarm_trading.core.models import OrderProposal, OrderStatus, Side, Symbol
 
 
@@ -159,13 +160,13 @@ def test_get_front_month_returns_valid_yyyymm_string():
 
 @pytest.mark.asyncio
 async def test_offline_connect_returns_true():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     assert await broker.connect() is True
 
 
 @pytest.mark.asyncio
 async def test_offline_execute_fills_immediately_at_proposal_price():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     proposal = _proposal()
     proposal.price = 1950.0
 
@@ -178,7 +179,7 @@ async def test_offline_execute_fills_immediately_at_proposal_price():
 
 @pytest.mark.asyncio
 async def test_offline_get_open_positions_reports_nothing_before_any_trade():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     assert await broker.get_open_positions() == []
 
 
@@ -187,7 +188,7 @@ async def test_offline_broker_reports_open_positions():
     """Offline used to hard-code [] here, hiding real paper positions from
     the orchestrator's floating-PnL calculation. Opening two trades must now
     surface both."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     await _offline_open(broker, symbol=Symbol.XAUUSD, price=1950.0, quantity=30.0)
     await _offline_open(broker, symbol=Symbol.OIL, price=80.0, sl_price=78.0, tp_price=84.0, quantity=30.0)
 
@@ -203,7 +204,7 @@ async def test_offline_broker_reports_open_positions():
 async def test_offline_get_open_positions_does_not_expose_internal_state():
     """Callers get copies: mutating a returned trade, or the returned list,
     must not rewrite the adapter's own view of what is open."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     trade_id = await _offline_open(broker, price=1950.0, quantity=30.0)
 
     positions = await broker.get_open_positions()
@@ -217,7 +218,7 @@ async def test_offline_get_open_positions_does_not_expose_internal_state():
 @pytest.mark.asyncio
 async def test_offline_closed_position_leaves_open_positions():
     """check_tp_sl() and get_open_positions() must agree on what is open."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     await _offline_open(broker, side=Side.LONG, price=1950.0, sl_price=1900.0, tp_price=2000.0, quantity=30.0)
 
     assert len(await broker.get_open_positions()) == 1
@@ -229,12 +230,18 @@ async def test_offline_closed_position_leaves_open_positions():
 
 @pytest.mark.asyncio
 async def test_offline_close_position_raises_not_implemented():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     with pytest.raises(NotImplementedError):
         await broker.close_position("any-id")
 
 
 # ─── check_tp_sl (offline TP/SL simulation) ────────────────────────────────
+#
+# These exercise TP/SL *mechanics* — which level was crossed, which side
+# closes, which symbol is touched — so they inject CostBook.zero() to hold
+# transaction costs out of the arithmetic. That also pins the guarantee that
+# a zero-cost instrument reproduces the pre-cost PnL formula exactly; the
+# cost model itself is covered in test_trade_costs.py.
 
 
 async def _offline_open(
@@ -257,7 +264,7 @@ async def _offline_open(
 
 @pytest.mark.asyncio
 async def test_check_tp_sl_closes_long_on_tp_hit():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     trade_id = await _offline_open(broker, side=Side.LONG, price=1950.0, sl_price=1900.0, tp_price=2000.0, quantity=2.0)
 
     closed = await broker.check_tp_sl(Symbol.XAUUSD, current_price=2005.0)
@@ -272,7 +279,7 @@ async def test_check_tp_sl_closes_long_on_tp_hit():
 
 @pytest.mark.asyncio
 async def test_check_tp_sl_closes_long_on_sl_hit():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     trade_id = await _offline_open(broker, side=Side.LONG, price=1950.0, sl_price=1900.0, tp_price=2000.0, quantity=1.0)
 
     closed = await broker.check_tp_sl(Symbol.XAUUSD, current_price=1890.0)
@@ -284,7 +291,7 @@ async def test_check_tp_sl_closes_long_on_sl_hit():
 
 @pytest.mark.asyncio
 async def test_check_tp_sl_closes_short_on_tp_and_sl():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     tp_trade = await _offline_open(broker, side=Side.SHORT, price=1950.0, sl_price=2000.0, tp_price=1900.0)
 
     closed = await broker.check_tp_sl(Symbol.XAUUSD, current_price=1895.0)
@@ -303,7 +310,7 @@ async def test_check_tp_sl_pnl_stays_proportional_for_large_index_prices():
     """Regression test: NAS100/US100 (quoted in ~29,000 index points) must
     not produce a wildly larger pnl than XAUUSD (~$1,950) for an equivalent
     *percentage* stop-out — both should lose ~notional * pct_move."""
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     notional = 0.02
 
     xau_id = await _offline_open(
@@ -337,7 +344,7 @@ async def test_check_tp_sl_pnl_stays_proportional_for_large_index_prices():
 
 @pytest.mark.asyncio
 async def test_check_tp_sl_leaves_trade_open_when_price_between_sl_and_tp():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     trade_id = await _offline_open(broker, sl_price=1900.0, tp_price=2000.0)
 
     closed = await broker.check_tp_sl(Symbol.XAUUSD, current_price=1950.0)
@@ -348,7 +355,7 @@ async def test_check_tp_sl_leaves_trade_open_when_price_between_sl_and_tp():
 
 @pytest.mark.asyncio
 async def test_check_tp_sl_only_touches_matching_symbol():
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     xau_id = await _offline_open(broker, symbol=Symbol.XAUUSD, sl_price=1900.0, tp_price=2000.0)
     oil_id = await _offline_open(broker, symbol=Symbol.OIL, price=80.0, sl_price=75.0, tp_price=85.0)
 
@@ -396,7 +403,7 @@ async def test_connect_runs_client_connect_off_the_event_loop(monkeypatch):
     # offline=True sidesteps __init__ trying to build a real _IBClient
     # (unavailable in this environment); flip back to False to exercise the
     # live-connect path with a fake client instead.
-    broker = IBKRBroker(offline=True)
+    broker = IBKRBroker(offline=True, cost_book=CostBook.zero())
     broker._offline = False
     fake_client = _FakeLiveIBClient(broker)
     broker._client = fake_client
